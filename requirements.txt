@@ -17,4 +17,5 @@ apscheduler==3.10.4
 flask-cors==4.0.1
 ta==0.11.0
 pytz==2024.1
+aiofiles==23.2.1
 pytest==8.2.0

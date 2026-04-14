@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 // ── Config ────────────────────────────────────────────────────────────────────
+// Empty string = same origin (API and dashboard served from the same Railway service).
+// Override only for local dev: set REACT_APP_API_URL=http://localhost:8000 in .env
 const API_URL =
   process.env.REACT_APP_API_URL ||
   localStorage.getItem('apex_api_url') ||
-  'http://localhost:8000';
+  '';
 
 const REFRESH_INTERVAL = 30_000; // 30 seconds
 
@@ -218,13 +220,9 @@ function RawStatusLog({ status }) {
 // ── Login screen ──────────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
   const [secret, setSecret] = useState('');
-  const [apiUrl, setApiUrl] = useState(API_URL);
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (apiUrl && apiUrl !== API_URL) {
-      localStorage.setItem('apex_api_url', apiUrl);
-    }
     localStorage.setItem('apex_secret', secret);
     onLogin(secret);
   };
@@ -236,23 +234,13 @@ function LoginScreen({ onLogin }) {
         <p className="text-gray-500 text-xs mb-6">Trading System Dashboard</p>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="text-xs text-gray-400 block mb-1">API URL</label>
-            <input
-              type="url"
-              value={apiUrl}
-              onChange={e => setApiUrl(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-sm text-gray-200 font-mono focus:outline-none focus:border-green-500"
-              placeholder="http://localhost:8000"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-400 block mb-1">Dashboard Secret</label>
+            <label className="text-xs text-gray-400 block mb-1">Dashboard Password</label>
             <input
               type="password"
               value={secret}
               onChange={e => setSecret(e.target.value)}
               className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-sm text-gray-200 font-mono focus:outline-none focus:border-green-500"
-              placeholder="Enter secret..."
+              placeholder="Enter your DASHBOARD_SECRET..."
               autoFocus
             />
           </div>

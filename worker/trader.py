@@ -529,5 +529,21 @@ def main():
         logger.info("Worker stopped")
 
 
+def start_background():
+    """
+    Start the trading scheduler in a daemon background thread.
+    Called by api/main.py on startup so the worker co-runs with the API.
+    The thread is a daemon so it exits automatically when the main process exits.
+    """
+    import threading
+
+    db.init_db()
+
+    thread = threading.Thread(target=main, daemon=True, name="apex-trader")
+    thread.start()
+    logger.info(f"Trading worker started in background thread ({thread.name})")
+    return thread
+
+
 if __name__ == "__main__":
     main()
