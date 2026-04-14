@@ -1,0 +1,28 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Railway Multi-Service Setup
+# ─────────────────────────────────────────────────────────────────────────────
+# This file configures the API service by default.
+# Create three separate Railway services pointed at the same GitHub repo,
+# then override the startCommand per service via the Railway dashboard:
+#
+#   Service 1 — api (uses startCommand above)
+#
+#   Service 2 — worker
+#     RAILWAY_RUN_COMMAND = python worker/trader.py
+#
+#   Service 3 — dashboard
+#     RAILWAY_RUN_COMMAND = cd dashboard && npm install && npm run build && npx serve -s build -l $PORT
+#     NODE_OPTIONS = --openssl-legacy-provider   (only if Node 22 crypto errors occur)
+#
+# All three services must share the same DATABASE_URL env var (Railway PostgreSQL).
+# ─────────────────────────────────────────────────────────────────────────────

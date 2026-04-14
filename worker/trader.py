@@ -1,0 +1,533 @@
+"""
+worker/trader.py — Main trading worker for Apex Trading System.
+
+Runs Monday-Friday 9:25 AM - 4:05 PM ET using APScheduler.
+Fetches SPY bars from yfinance, runs MomentumBreakout strategy,
+checks regime and risk, places paper orders via Alpaca, and logs everything.
+
+Deploy as a Railway worker process. Handles SIGTERM gracefully.
+"""
+import json
+import os
+import signal
+import sys
+from datetime import datetime, time, timezone
+from pathlib import Path
+
+import pytz
+import yfinance as yf
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+from dotenv import load_dotenv
+from loguru import logger
+
+# load_dotenv BEFORE any internal imports that create DB engines
+load_dotenv()
+
+# Internal imports (after load_dotenv so DATABASE_URL is set)
+from worker import db, risk
+from worker.strategy import MomentumBreakout
+from worker.email_report import send_daily_report
+from diagnostics.analyzer import analyze_anomaly
+from models.regime_classifier import RegimeClassifier
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+ET = pytz.timezone("America/New_York")
+SYMBOL = "SPY"
+PAPER = True
+SESSION_START = time(9, 25)
+SESSION_END = time(16, 5)
+
+# ── Global mutable state ──────────────────────────────────────────────────────
+_state = {
+    "daily_pnl": 0.0,
+    "trade_count": 0,
+    "consecutive_losses": 0,
+    "peak_equity": 100_000.0,
+    "current_equity": 100_000.0,
+    "current_position": None,   # dict or None
+    "is_paused": False,
+    "kill_switch_active": False,
+    "regime": "Weak Trend",
+    "daily_trades": [],         # list of completed trade dicts for the day
+    "session_day": 1,           # day number in 20-day evaluation period
+}
+
+# Lazy-initialized Alpaca client (not created until first use)
+_trading_client = None
+_strategy = MomentumBreakout()
+_classifier = RegimeClassifier()
+_scheduler = None
+
+
+def _get_trading_client():
+    """Lazy initialize the Alpaca TradingClient."""
+    global _trading_client
+    if _trading_client is None:
+        from alpaca.trading.client import TradingClient
+        api_key = os.getenv("ALPACA_API_KEY", "")
+        secret_key = os.getenv("ALPACA_SECRET_KEY", os.getenv("ALPACA_API_SECRET", ""))
+        if not api_key or not secret_key:
+            logger.warning("Alpaca API keys not set — order placement will be simulated")
+            return None
+        _trading_client = TradingClient(api_key, secret_key, paper=PAPER)
+    return _trading_client
+
+
+# ── Helper functions ──────────────────────────────────────────────────────────
+def _now_et() -> datetime:
+    return datetime.now(ET)
+
+
+def _is_session_hours() -> bool:
+    t = _now_et().time()
+    return SESSION_START <= t <= SESSION_END
+
+
+def _fetch_bars():
+    """Fetch recent SPY 5-minute bars from yfinance."""
+    try:
+        df = yf.download(
+            SYMBOL,
+            period="2d",
+            interval="5m",
+            auto_adjust=True,
+            progress=False,
+            # Suppress yfinance multi-level column warning
+        )
+        if df.empty:
+            logger.warning("yfinance returned empty DataFrame")
+            return None
+        # Handle multi-level columns from yfinance 0.2.x
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch bars: {e}")
+        return None
+
+
+def _place_buy_order(signal: dict) -> dict | None:
+    """
+    Place a paper buy order via Alpaca.
+    Returns order dict on success, None on failure.
+    Simulates the order if Alpaca keys are missing.
+    """
+    client = _get_trading_client()
+    levels = _strategy.get_levels(signal["price"], signal["atr"])
+
+    if client is None:
+        # Simulated paper order
+        logger.info(f"[SIMULATED] BUY {risk.MAX_CONTRACTS} {SYMBOL} @ {signal['price']:.2f}")
+        return {
+            "id": f"sim_{datetime.now().timestamp()}",
+            "symbol": SYMBOL,
+            "qty": risk.MAX_CONTRACTS,
+            "side": "buy",
+            "status": "filled",
+            "filled_avg_price": signal["price"],
+        }
+
+    try:
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+
+        req = MarketOrderRequest(
+            symbol=SYMBOL,
+            qty=risk.MAX_CONTRACTS,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = client.submit_order(order_data=req)
+        logger.info(f"BUY order placed: {order.id} — {risk.MAX_CONTRACTS} {SYMBOL}")
+        return {
+            "id": str(order.id),
+            "symbol": SYMBOL,
+            "qty": risk.MAX_CONTRACTS,
+            "side": "buy",
+            "status": str(order.status),
+            "filled_avg_price": float(order.filled_avg_price or signal["price"]),
+        }
+    except Exception as e:
+        logger.error(f"Failed to place buy order: {e}")
+        return None
+
+
+def _place_sell_order(qty: int) -> bool:
+    """Place a market sell order to close the position."""
+    client = _get_trading_client()
+    if client is None:
+        logger.info(f"[SIMULATED] SELL {qty} {SYMBOL}")
+        return True
+    try:
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+
+        req = MarketOrderRequest(
+            symbol=SYMBOL,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = client.submit_order(order_data=req)
+        logger.info(f"SELL order placed: {order.id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to place sell order: {e}")
+        return False
+
+
+def _close_position(reason: str, exit_price: float):
+    """Close the current position and log the trade."""
+    pos = _state["current_position"]
+    if pos is None:
+        return
+
+    entry_price = pos["entry"]
+    stop_price = pos["stop"]
+    qty = pos["qty"]
+
+    pnl_dollars = (exit_price - entry_price) * qty
+    atr = pos.get("atr", 0)
+    risk_amount = abs(entry_price - stop_price) * qty
+    pnl_r = pnl_dollars / risk_amount if risk_amount > 0 else 0.0
+
+    # Update state
+    _state["daily_pnl"] += pnl_dollars
+    _state["current_equity"] += pnl_dollars
+    _state["peak_equity"] = max(_state["peak_equity"], _state["current_equity"])
+
+    if pnl_dollars > 0:
+        _state["consecutive_losses"] = 0
+    else:
+        _state["consecutive_losses"] += 1
+
+    trade_data = {
+        "entry_time": pos.get("entry_time"),
+        "exit_time": datetime.now(timezone.utc),
+        "symbol": SYMBOL,
+        "direction": "LONG",
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "stop_price": stop_price,
+        "target_price": pos.get("target"),
+        "shares": qty,
+        "pnl_dollars": pnl_dollars,
+        "pnl_r": pnl_r,
+        "atr_at_entry": atr,
+        "volume_ratio": pos.get("volume_ratio", 0),
+        "exit_reason": reason,
+        "regime": _state["regime"],
+        "consecutive_losses": _state["consecutive_losses"],
+    }
+    db.log_trade(trade_data)
+    _state["daily_trades"].append(trade_data)
+    _state["current_position"] = None
+    _state["trade_count"] += 1
+
+    logger.info(
+        f"Trade closed: {reason} | P&L=${pnl_dollars:+.2f} | R={pnl_r:.2f} | "
+        f"Consecutive losses: {_state['consecutive_losses']}"
+    )
+
+    # Place sell order (fire-and-forget — position may already be closed by stop)
+    _place_sell_order(qty)
+
+    # Check kill switch after trade
+    ks = risk.check_kill_switch(
+        _state["consecutive_losses"],
+        _state["daily_pnl"],
+        _state["peak_equity"],
+        _state["current_equity"],
+    )
+    if ks["pause"] and not _state["kill_switch_active"]:
+        _state["kill_switch_active"] = True
+        _state["is_paused"] = True
+        logger.critical(f"KILL SWITCH ACTIVATED: {ks['reason']}")
+        analyze_anomaly("kill_switch", {
+            "reason": ks["reason"],
+            "daily_pnl": _state["daily_pnl"],
+            "consecutive_losses": _state["consecutive_losses"],
+            "current_equity": _state["current_equity"],
+        })
+
+
+# ── APScheduler jobs ──────────────────────────────────────────────────────────
+def five_min_bar_job():
+    """Main trading logic — runs every 5 minutes during session hours."""
+    if _state["is_paused"]:
+        return
+    if not _is_session_hours():
+        return
+
+    now_et = _now_et()
+
+    # ── Fetch data ────────────────────────────────────────────────────────────
+    df = _fetch_bars()
+    if df is None or len(df) < 30:
+        logger.warning("Insufficient data — skipping bar")
+        return
+
+    # ── Compute indicators ────────────────────────────────────────────────────
+    try:
+        df = _strategy.compute_indicators(df)
+    except Exception as e:
+        logger.error(f"compute_indicators error: {e}")
+        return
+
+    # ── Monitor open position ─────────────────────────────────────────────────
+    if _state["current_position"] is not None:
+        pos = _state["current_position"]
+        current_price = float(df["Close"].iloc[-1])
+
+        # Check stop
+        if current_price <= pos["stop"]:
+            _close_position("stop_hit", current_price)
+            return
+
+        # Check target
+        if current_price >= pos["target"]:
+            _close_position("target_hit", current_price)
+            return
+
+        # Check max hold (4 hours)
+        entry_time = pos.get("entry_time")
+        if entry_time:
+            elapsed = (datetime.now(timezone.utc) - entry_time).total_seconds() / 60
+            if elapsed >= _strategy.MAX_HOLD_MINUTES:
+                _close_position("max_hold_exceeded", current_price)
+                return
+
+        return  # Still holding, nothing to do
+
+    # ── Regime check ──────────────────────────────────────────────────────────
+    try:
+        regime = _classifier.classify(df)
+        _state["regime"] = regime
+        if regime in ("Range-Bound", "Extreme Volatility"):
+            logger.debug(f"Regime {regime} — no entry")
+            db.log_risk_check("regime", "BLOCKED", f"Regime is {regime}")
+            return
+    except Exception as e:
+        logger.error(f"Regime classification error: {e}")
+        regime = "Weak Trend"
+        _state["regime"] = regime
+
+    # ── Signal generation ─────────────────────────────────────────────────────
+    signal = _strategy.generate_signals(df, now_et, _state["trade_count"])
+    if signal is None:
+        return
+
+    # ── Risk check ────────────────────────────────────────────────────────────
+    risk_result = risk.pre_trade_check(
+        daily_pnl=_state["daily_pnl"],
+        trade_count=_state["trade_count"],
+        time_et=now_et,
+        consecutive_losses=_state["consecutive_losses"],
+    )
+    result_str = "APPROVED" if risk_result["approved"] else "BLOCKED"
+    db.log_risk_check("pre_trade", result_str, risk_result["reason"])
+
+    if not risk_result["approved"]:
+        logger.debug(f"Risk check blocked: {risk_result['reason']}")
+        return
+
+    # ── Place order ───────────────────────────────────────────────────────────
+    order = _place_buy_order(signal)
+    if order is None:
+        return
+
+    levels = _strategy.get_levels(signal["price"], signal["atr"])
+    _state["current_position"] = {
+        "entry_time": datetime.now(timezone.utc),
+        "entry": levels["entry"],
+        "stop": levels["stop"],
+        "target": levels["target"],
+        "qty": risk.MAX_CONTRACTS,
+        "atr": signal["atr"],
+        "volume_ratio": signal.get("volume_ratio", 0),
+        "order_id": order.get("id"),
+    }
+    logger.info(
+        f"Position opened: {SYMBOL} @ {levels['entry']:.2f} | "
+        f"Stop={levels['stop']:.2f} | Target={levels['target']:.2f} | "
+        f"Regime={regime}"
+    )
+
+
+def update_status_job():
+    """Update system_status table every 60 seconds."""
+    try:
+        db.log_status({
+            "status": "PAUSED" if _state["is_paused"] else "RUNNING",
+            "regime": _state["regime"],
+            "trade_count_today": _state["trade_count"],
+            "daily_pnl": _state["daily_pnl"],
+            "consecutive_losses": _state["consecutive_losses"],
+            "kill_switch_active": _state["kill_switch_active"],
+            "message": f"Equity=${_state['current_equity']:.0f} | Position={'OPEN' if _state['current_position'] else 'NONE'}",
+        })
+    except Exception as e:
+        logger.error(f"update_status_job error: {e}")
+
+
+def market_open_job():
+    """Reset daily state at 9:25 AM ET."""
+    logger.info("Market open — resetting daily state")
+    _state["daily_pnl"] = 0.0
+    _state["trade_count"] = 0
+    _state["consecutive_losses"] = 0
+    _state["is_paused"] = False
+    _state["kill_switch_active"] = False
+    _state["daily_trades"] = []
+    # Note: peak_equity and current_equity carry over (drawdown is cumulative)
+
+    db.log_status({
+        "status": "RUNNING",
+        "regime": _state["regime"],
+        "trade_count_today": 0,
+        "daily_pnl": 0.0,
+        "consecutive_losses": 0,
+        "kill_switch_active": False,
+        "message": "Session started",
+    })
+
+
+def end_of_day_job():
+    """4:05 PM ET: force-close any open position, compute summary, send email."""
+    logger.info("End of day — running EOD procedure")
+
+    # Force-close any open position
+    if _state["current_position"] is not None:
+        df = _fetch_bars()
+        if df is not None and not df.empty:
+            exit_price = float(df["Close"].iloc[-1])
+        else:
+            exit_price = _state["current_position"]["entry"]  # fallback
+        _close_position("end_of_day", exit_price)
+
+    # Increment session day counter
+    _state["session_day"] += 1
+
+    # Compute and log daily summary
+    today_trades = _state["daily_trades"]
+    wins = [t for t in today_trades if (t.get("pnl_dollars") or 0) > 0]
+    pnls = [t.get("pnl_dollars", 0) for t in today_trades]
+    rs = [t.get("pnl_r", 0) for t in today_trades]
+    equity_curve = []
+    running = 0.0
+    for p in pnls:
+        running += p
+        equity_curve.append(running)
+
+    max_dd = 0.0
+    if equity_curve:
+        peak = equity_curve[0]
+        for v in equity_curve:
+            peak = max(peak, v)
+            max_dd = min(max_dd, v - peak)
+
+    regime_dist = {}
+    for t in today_trades:
+        r = t.get("regime", "Unknown")
+        regime_dist[r] = regime_dist.get(r, 0) + 1
+
+    db.log_daily_summary({
+        "trade_date": datetime.now(ET).date(),
+        "total_trades": len(today_trades),
+        "winning_trades": len(wins),
+        "gross_pnl": sum(pnls),
+        "max_drawdown": max_dd,
+        "win_rate": len(wins) / len(today_trades) if today_trades else 0.0,
+        "avg_r": sum(rs) / len(rs) if rs else 0.0,
+        "rule_violations": 0,
+        "regime_distribution": json.dumps(regime_dist),
+    })
+
+    # Send daily email
+    try:
+        send_daily_report(trade_day_n=_state["session_day"])
+    except Exception as e:
+        logger.error(f"Email report failed: {e}")
+
+    logger.info(
+        f"EOD complete — Day {_state['session_day']} | "
+        f"Trades={len(today_trades)} | P&L=${sum(pnls):+.2f}"
+    )
+
+
+# ── Startup & shutdown ────────────────────────────────────────────────────────
+def _handle_sigterm(signum, frame):
+    """Graceful shutdown on SIGTERM."""
+    logger.info("SIGTERM received — shutting down gracefully")
+    _state["is_paused"] = True
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+    sys.exit(0)
+
+
+def main():
+    global _scheduler
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Initialize DB
+    db.init_db()
+
+    # Load or train regime model if not present
+    from pathlib import Path
+    model_path = Path(__file__).parent.parent / "models" / "regime_rf.pkl"
+    if not model_path.exists():
+        logger.info("No regime model found — worker will use default 'Weak Trend'")
+        logger.info("Run `python backtest/run.py` to train and save the model")
+
+    logger.info("Apex Trading Worker starting...")
+
+    _scheduler = BlockingScheduler(timezone="America/New_York")
+
+    # Every 5 minutes during session hours (Mon-Fri)
+    _scheduler.add_job(
+        five_min_bar_job,
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5"),
+        id="five_min_bar",
+        name="5-Minute Bar Job",
+        misfire_grace_time=60,
+    )
+
+    # Status update every 60 seconds
+    _scheduler.add_job(
+        update_status_job,
+        IntervalTrigger(seconds=60),
+        id="update_status",
+        name="Status Update",
+    )
+
+    # Market open reset at 9:25 AM ET Mon-Fri
+    _scheduler.add_job(
+        market_open_job,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
+        id="market_open",
+        name="Market Open Reset",
+    )
+
+    # End of day at 4:05 PM ET Mon-Fri
+    _scheduler.add_job(
+        end_of_day_job,
+        CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
+        id="end_of_day",
+        name="End of Day",
+    )
+
+    logger.info(
+        "Scheduler started — jobs: 5min_bar, status_update, market_open, end_of_day"
+    )
+
+    try:
+        _scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Worker stopped")
+
+
+if __name__ == "__main__":
+    main()
