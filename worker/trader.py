@@ -366,6 +366,7 @@ def update_status_job():
             "daily_pnl": _state["daily_pnl"],
             "consecutive_losses": _state["consecutive_losses"],
             "kill_switch_active": _state["kill_switch_active"],
+            "session_day": _state["session_day"],
             "message": f"Equity=${_state['current_equity']:.0f} | Position={'OPEN' if _state['current_position'] else 'NONE'}",
         })
     except Exception as e:
@@ -390,6 +391,7 @@ def market_open_job():
         "daily_pnl": 0.0,
         "consecutive_losses": 0,
         "kill_switch_active": False,
+        "session_day": _state["session_day"],
         "message": "Session started",
     })
 

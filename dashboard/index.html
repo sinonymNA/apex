@@ -378,20 +378,22 @@ function renderHeader(status) {
 }
 
 function renderStats(status, summary) {
-  // P&L
-  const pnl = summary && (summary.total_pnl ?? summary.pnl);
+  // P&L: prefer summary (closed trades), fall back to live status value
+  const pnl = (summary && (summary.total_pnl ?? summary.gross_pnl ?? summary.pnl))
+               ?? (status && status.daily_pnl);
   document.getElementById('stat-pnl').innerHTML = fmt$(pnl);
 
-  // Trades
-  const tc = summary && (summary.total_trades ?? summary.trade_count);
+  // Trades: prefer summary, fall back to live status value
+  const tc = (summary && (summary.total_trades ?? summary.trade_count))
+              ?? (status && status.trade_count_today);
   document.getElementById('stat-trades').textContent = tc != null ? tc : '—';
 
-  // Win rate
+  // Win rate: only meaningful from summary (needs closed trades)
   const wr = summary && (summary.win_rate ?? summary.winrate);
   document.getElementById('stat-winrate').innerHTML = fmtPct(wr);
 
-  // Gate day
-  const gd = status && (status.gate_day ?? status.trading_day);
+  // Gate day: from status (written every 60s by worker)
+  const gd = status && (status.session_day ?? status.gate_day ?? status.trading_day);
   document.getElementById('stat-gateday').innerHTML =
     gd != null ? `<span class="text-gray-300">${gd}<span class="text-gray-600">/20</span></span>` : '—';
 

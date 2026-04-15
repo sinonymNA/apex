@@ -13,7 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, Integer, Float, String, Boolean,
-    DateTime, Date, Text, JSON, inspect as sa_inspect
+    DateTime, Date, Text, JSON, inspect as sa_inspect, text
 )
 from sqlalchemy.orm import DeclarativeBase, Session
 from loguru import logger
@@ -74,6 +74,7 @@ class SystemStatus(Base):
     daily_pnl = Column(Float, default=0.0)
     consecutive_losses = Column(Integer, default=0)
     kill_switch_active = Column(Boolean, default=False)
+    session_day = Column(Integer, default=1)
     message = Column(Text, nullable=True)
 
     def to_dict(self):
@@ -157,8 +158,19 @@ class Anomaly(Base):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 def init_db():
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist. Also runs additive column migrations."""
     Base.metadata.create_all(engine)
+    # Additive migrations — safe to run repeatedly (errors = column already exists)
+    _migrations = [
+        "ALTER TABLE system_status ADD COLUMN session_day INTEGER DEFAULT 1",
+    ]
+    with engine.connect() as conn:
+        for stmt in _migrations:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                pass  # column already exists — ignore
     logger.info("Database initialized.")
 
 
