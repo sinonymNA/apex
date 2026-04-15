@@ -30,8 +30,10 @@ load_dotenv()
 
 from worker.db import (  # noqa: E402
     get_gate_status,
+    get_last_near_miss,
     get_latest_status,
     get_recent_anomalies,
+    get_recent_near_misses,
     get_recent_trades,
     get_risk_log,
     get_today_summary,
@@ -112,6 +114,28 @@ async def startup_event():
     logger.info("Apex Trading System API ready")
 
 
+# ── Helper ────────────────────────────────────────────────────────────────────
+def _build_human_summary(row: dict) -> str:
+    """Convert a near_miss_signals row into a plain-English sentence."""
+    if not row:
+        return "No signal data yet — bars are being evaluated every 5 minutes."
+    reason = row.get("blocked_reason", "")
+    pct    = abs(row.get("percent_to_breakout") or 0.0)
+    vr     = row.get("volume_ratio") or 0.0
+    regime = row.get("regime", "Unknown")
+    sym    = row.get("symbol", "SPY")
+
+    summaries = {
+        "regime_blocked":      f"{sym} met conditions but regime was {regime} — entry blocked.",
+        "outside_time_window": f"{sym} had activity outside the 10:00–15:30 ET window.",
+        "max_trades_reached":  f"{sym} had a setup but daily trade limit was already reached.",
+        "risk_blocked":        f"{sym} cleared all conditions but risk engine blocked the entry.",
+        "volume_not_met":      f"{sym} cleared breakout level but volume was only {vr:.2f}x (need 1.5x).",
+        "breakout_not_met":    f"{sym} came within {pct:.2f}% of breakout level (volume: {vr:.2f}x).",
+    }
+    return summaries.get(reason, f"{sym} near-miss — {pct:.2f}% from breakout, volume {vr:.2f}x.")
+
+
 # ── API Routes ─────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
@@ -169,7 +193,7 @@ async def diagnostics():
         with engine.connect() as conn:
             conn.execute(__import__("sqlalchemy").text("SELECT 1"))
         db_url = os.getenv("DATABASE_URL", "sqlite")
-        db_type = "PostgreSQL" if db_url.startswith("postgres") else "SQLite"
+        db_type = "PostgreSQL" if ("postgresql" in db_url or "postgres" in db_url) else "SQLite"
         checks["database"] = {"ok": True, "detail": f"{db_type} connected"}
     except Exception as e:
         checks["database"] = {"ok": False, "detail": str(e)[:120]}
@@ -226,6 +250,25 @@ async def diagnostics():
 
     all_ok = all(v["ok"] for v in checks.values())
     return {"all_ok": all_ok, "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/debug/last-signal", dependencies=[Depends(verify_auth)])
+async def get_last_signal():
+    """Most recent near-miss bar evaluation with plain-English summary."""
+    row = get_last_near_miss()
+    if not row:
+        return {
+            "message": "No signal evaluation data yet.",
+            "human_summary": "No signal data yet — bars are being evaluated every 5 minutes.",
+        }
+    row["human_summary"] = _build_human_summary(row)
+    return row
+
+
+@app.get("/api/near-misses", dependencies=[Depends(verify_auth)])
+async def get_near_misses(limit: int = Query(default=20, ge=1, le=100)):
+    """Recent near-miss signals (bars close to triggering but blocked)."""
+    return get_recent_near_misses(n=limit)
 
 
 # ── Dashboard catch-all (must be LAST so /api/* routes take precedence) ────────

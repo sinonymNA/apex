@@ -169,3 +169,47 @@ class MomentumBreakout:
             "stop": round(entry_price - self.STOP_ATR * atr, 2),
             "target": round(entry_price + self.TARGET_ATR * atr, 2),
         }
+
+    def evaluate_signal_state(self, df: pd.DataFrame) -> dict | None:
+        """
+        Evaluate last bar's proximity to an entry signal without generating one.
+        Called by the worker every bar to log near-miss visibility data.
+
+        Returns dict with near-miss flags, or None if insufficient data.
+        # TODO SPY→ES: Symbol is passed from the caller; this method is symbol-agnostic.
+        """
+        required_cols = {"high_20", "volume_avg", "Close", "Volume"}
+        if not required_cols.issubset(df.columns):
+            return None
+
+        valid = df.dropna(subset=["high_20", "volume_avg"])
+        if valid.empty:
+            return None
+
+        last = valid.iloc[-1]
+        close        = float(last["Close"])
+        high_20      = float(last["high_20"])
+        volume       = float(last["Volume"])
+        volume_avg   = float(last["volume_avg"])
+        required_vol = self.VOLUME_MULTIPLIER * volume_avg  # 1.5x
+
+        pct_to_breakout = (close - high_20) / high_20 * 100 if high_20 > 0 else None
+        vol_ratio       = volume / required_vol if required_vol > 0 else 0.0
+
+        # Near-miss conditions:
+        #   a) close within 0.3% below breakout level
+        #   b) volume at least 80% of required breakout volume
+        price_near  = pct_to_breakout is not None and pct_to_breakout >= -0.3
+        volume_near = vol_ratio >= 0.8
+
+        return {
+            "close":               close,
+            "breakout_level":      high_20,
+            "percent_to_breakout": pct_to_breakout,
+            "volume":              volume,
+            "required_volume":     required_vol,
+            "volume_ratio":        vol_ratio,
+            "price_near_miss":     price_near,
+            "volume_near_miss":    volume_near,
+            "is_near_miss":        price_near or volume_near,
+        }

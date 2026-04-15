@@ -21,15 +21,36 @@ from loguru import logger
 load_dotenv()
 
 # ── Engine setup ──────────────────────────────────────────────────────────────
-_DATABASE_URL = os.getenv("DATABASE_URL", "")
-if not _DATABASE_URL:
+_raw_url = os.getenv("DATABASE_URL", "")
+
+# Normalize Railway's postgres:// → postgresql:// (SQLAlchemy requirement)
+if _raw_url.startswith("postgres://"):
+    _raw_url = _raw_url.replace("postgres://", "postgresql://", 1)
+
+_is_postgres = _raw_url.startswith("postgresql")
+_is_sqlite   = not _is_postgres
+
+if _is_sqlite:
     _log_dir = Path(__file__).parent.parent / "logs"
     _log_dir.mkdir(exist_ok=True)
-    _DATABASE_URL = f"sqlite:///{_log_dir}/trades.db"
-    logger.info(f"DATABASE_URL not set — using SQLite fallback: {_DATABASE_URL}")
-
-_connect_args = {"check_same_thread": False} if _DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(_DATABASE_URL, connect_args=_connect_args, echo=False)
+    _DATABASE_URL = _raw_url or f"sqlite:///{_log_dir}/trades.db"
+    _connect_args = {"check_same_thread": False}
+    engine = create_engine(_DATABASE_URL, connect_args=_connect_args, echo=False)
+    logger.warning(
+        "Running on SQLite — data will be lost on Railway redeploy. "
+        "Add Railway PostgreSQL plugin for persistence."
+    )
+else:
+    _DATABASE_URL = _raw_url
+    # SSL required for Railway PostgreSQL; pooling prevents stale connections
+    engine = create_engine(
+        _DATABASE_URL,
+        connect_args={"sslmode": "require"},
+        pool_pre_ping=True,
+        pool_recycle=300,
+        echo=False,
+    )
+    logger.info("PostgreSQL engine created with SSL + pool_pre_ping")
 
 
 # ── ORM Base ──────────────────────────────────────────────────────────────────
@@ -154,6 +175,27 @@ class Anomaly(Base):
             except Exception:
                 pass
         return d
+
+
+class NearMissSignal(Base):
+    __tablename__ = "near_miss_signals"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp           = Column(DateTime, nullable=False,
+                                 default=lambda: datetime.now(timezone.utc))
+    symbol              = Column(String(16), nullable=False, default="SPY")
+    close               = Column(Float, nullable=True)
+    breakout_level      = Column(Float, nullable=True)
+    percent_to_breakout = Column(Float, nullable=True)  # negative = below level
+    volume              = Column(Float, nullable=True)
+    required_volume     = Column(Float, nullable=True)
+    volume_ratio        = Column(Float, nullable=True)   # actual / required
+    regime              = Column(String(32), nullable=True)
+    blocked_reason      = Column(String(64), nullable=True)
+    trades_today        = Column(Integer, nullable=True)
+
+    def to_dict(self):
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -309,6 +351,70 @@ def log_daily_summary(data: dict):
             row = DailySummary(**{k: v for k, v in data.items() if k in DailySummary.__table__.columns.keys()})
             session.add(row)
         session.commit()
+
+
+def log_near_miss(data: dict):
+    """Insert a near-miss signal record.
+    Deduplicates: skips write if a row with same symbol+timestamp (minute-rounded) exists.
+    """
+    with Session(engine) as session:
+        # Round to minute for deduplication
+        ts = data.get("timestamp") or datetime.now(timezone.utc)
+        ts_minute = ts.replace(second=0, microsecond=0)
+        sym = data.get("symbol", "SPY")
+        exists = (
+            session.query(NearMissSignal)
+            .filter(
+                NearMissSignal.symbol == sym,
+                NearMissSignal.timestamp >= ts_minute,
+            )
+            .first()
+        )
+        if exists:
+            return  # already logged this bar
+        row = NearMissSignal(**{
+            k: v for k, v in data.items()
+            if k in NearMissSignal.__table__.columns.keys()
+        })
+        session.add(row)
+        session.commit()
+
+
+def get_recent_near_misses(n: int = 20) -> list:
+    """Return the N most recent near-miss signal records."""
+    with Session(engine) as session:
+        rows = (
+            session.query(NearMissSignal)
+            .order_by(NearMissSignal.id.desc())
+            .limit(n)
+            .all()
+        )
+        return [r.to_dict() for r in rows]
+
+
+def get_last_near_miss() -> dict:
+    """Return the single most recent near-miss record, or {}."""
+    with Session(engine) as session:
+        row = (
+            session.query(NearMissSignal)
+            .order_by(NearMissSignal.id.desc())
+            .first()
+        )
+        return row.to_dict() if row else {}
+
+
+def get_today_near_misses() -> list:
+    """Return all near-miss records from today (for email report)."""
+    from sqlalchemy import cast, Date as SADate
+    today = date.today()
+    with Session(engine) as session:
+        rows = (
+            session.query(NearMissSignal)
+            .filter(cast(NearMissSignal.timestamp, SADate) == today)
+            .order_by(NearMissSignal.id.desc())
+            .all()
+        )
+        return [r.to_dict() for r in rows]
 
 
 # Auto-initialize on import

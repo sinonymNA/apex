@@ -68,6 +68,7 @@
       <span class="text-green-400 font-bold tracking-widest">▲ APEX</span>
       <span class="text-gray-500 text-xs hidden sm:inline uppercase tracking-wider">Trading System</span>
       <span id="hdr-status-badge" class="badge bg-gray-700 text-gray-400">LOADING</span>
+      <span id="hdr-spy-price" class="text-gray-500 text-xs hidden sm:inline">SPY —</span>
     </div>
     <div class="flex items-center gap-3">
       <span id="hdr-updated" class="text-gray-500 text-xs hidden sm:inline"></span>
@@ -104,8 +105,41 @@
       </div>
     </div>
 
+    <!-- ── Last Signal Check ─────────────────────────────────────────── -->
+    <div id="last-signal-panel" class="bg-gray-900 border border-gray-800 rounded-lg">
+      <div class="px-4 py-2 border-b border-gray-800 flex items-center justify-between">
+        <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">Last Signal Check</span>
+        <span id="last-signal-time" class="text-gray-600 text-xs"></span>
+      </div>
+      <div id="last-signal-summary" class="px-4 py-3 text-sm text-gray-400">Loading…</div>
+      <div id="last-signal-detail" class="px-4 pb-3 text-xs text-gray-600 grid grid-cols-2 gap-1"></div>
+    </div>
+
+    <!-- ── Near Misses ────────────────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-lg">
+      <div class="px-4 py-2 border-b border-gray-800">
+        <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">Near Misses</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="border-b border-gray-800 text-gray-500 uppercase tracking-wider">
+              <th class="text-left px-4 py-2">Time</th>
+              <th class="text-right px-4 py-2">Close</th>
+              <th class="text-right px-4 py-2">Δ%</th>
+              <th class="text-right px-4 py-2">Vol Ratio</th>
+              <th class="text-left px-4 py-2 hidden sm:table-cell">Reason</th>
+            </tr>
+          </thead>
+          <tbody id="near-misses-body">
+            <tr><td colspan="5" class="px-4 py-4 text-center text-gray-600">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- ── Stat cards ──────────────────────────────────────────────────── -->
-    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
       <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
         <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Daily P&amp;L</div>
         <div id="stat-pnl" class="text-xl font-bold text-gray-300">—</div>
@@ -118,9 +152,10 @@
         <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Win Rate</div>
         <div id="stat-winrate" class="text-xl font-bold text-gray-300">—</div>
       </div>
-      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
-        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Gate Day</div>
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3 col-span-2 sm:col-span-1">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Gate Progress</div>
         <div id="stat-gateday" class="text-xl font-bold text-gray-300">—</div>
+        <div id="stat-days-remaining" class="text-gray-600 text-xs mt-1">— days remaining</div>
       </div>
       <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
         <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Regime</div>
@@ -280,26 +315,30 @@ async function doRefresh() {
   document.getElementById('countdown').textContent = _countdownVal;
   const headers = { 'X-Dashboard-Secret': _secret };
 
-  const [statusRes, summaryRes, tradesRes, gatesRes, riskRes, anomalyRes, diagRes] =
+  const [statusRes, summaryRes, tradesRes, gatesRes, riskRes, anomalyRes, diagRes, lastSignalRes, nearMissesRes] =
     await Promise.allSettled([
-      fetch('/api/status',      { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/summary',     { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/trades',      { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/gates',       { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/risk-log',    { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/anomalies',   { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/diagnostics', { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/status',              { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/summary',             { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/trades',              { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/gates',               { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/risk-log',            { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/anomalies',           { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/diagnostics',         { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/debug/last-signal',   { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/near-misses',         { headers }).then(r => r.ok ? r.json() : null),
     ]);
 
   const val = (res) => res.status === 'fulfilled' ? res.value : null;
 
-  renderHeader(val(statusRes));
+  renderHeader(val(statusRes), val(lastSignalRes));
   renderStats(val(statusRes), val(summaryRes));
   renderGates(val(gatesRes), val(statusRes));
   renderTrades(val(tradesRes));
   renderRiskLog(val(riskRes));
   renderAnomalies(val(anomalyRes));
   renderSysCheck(val(diagRes));
+  renderLastSignal(val(lastSignalRes));
+  renderNearMisses(val(nearMissesRes));
 
   const now = new Date();
   document.getElementById('hdr-updated').textContent =
@@ -371,10 +410,15 @@ function severityBadge(sev) {
 }
 
 // ── Render functions ──────────────────────────────────────────────────────────
-function renderHeader(status) {
+function renderHeader(status, lastSignal) {
   const ws = status && (status.worker_status || status.status);
   document.getElementById('hdr-status-badge').outerHTML =
     `<span id="hdr-status-badge">${statusBadge(ws || 'LOADING')}</span>`;
+  const price = lastSignal && lastSignal.close;
+  const priceEl = document.getElementById('hdr-spy-price');
+  if (priceEl) {
+    priceEl.textContent = price ? `SPY $${Number(price).toFixed(2)}` : 'SPY —';
+  }
 }
 
 function renderStats(status, summary) {
@@ -396,6 +440,9 @@ function renderStats(status, summary) {
   const gd = status && (status.session_day ?? status.gate_day ?? status.trading_day);
   document.getElementById('stat-gateday').innerHTML =
     gd != null ? `<span class="text-gray-300">${gd}<span class="text-gray-600">/20</span></span>` : '—';
+  const remaining = gd != null ? Math.max(0, 20 - gd) : null;
+  document.getElementById('stat-days-remaining').textContent =
+    remaining != null ? `${remaining} day${remaining !== 1 ? 's' : ''} remaining` : '— days remaining';
 
   // Regime
   const regime = status && status.regime;
@@ -554,6 +601,59 @@ function renderSysCheck(data) {
       <span class="text-gray-300 w-32 shrink-0">${label}</span>
       ${detail}
     </div>`;
+  }).join('');
+}
+
+// ── Last Signal + Near Misses ─────────────────────────────────────────────────
+function renderLastSignal(data) {
+  const summary = document.getElementById('last-signal-summary');
+  const detail  = document.getElementById('last-signal-detail');
+  const timeEl  = document.getElementById('last-signal-time');
+
+  if (!data || data.message) {
+    summary.textContent = (data && data.human_summary) || 'No signal evaluation data yet.';
+    detail.innerHTML = '';
+    if (timeEl) timeEl.textContent = '';
+    return;
+  }
+
+  summary.textContent = data.human_summary || '—';
+
+  if (timeEl && data.timestamp) {
+    try {
+      timeEl.textContent = new Date(data.timestamp).toLocaleTimeString('en-US', { hour12: false });
+    } catch { timeEl.textContent = ''; }
+  }
+
+  const items = [
+    ['Close',         data.close        != null ? `$${Number(data.close).toFixed(2)}`        : '—'],
+    ['Breakout Lvl',  data.breakout_level != null ? `$${Number(data.breakout_level).toFixed(2)}` : '—'],
+    ['Vol Ratio',     data.volume_ratio  != null ? `${Number(data.volume_ratio).toFixed(2)}x` : '—'],
+    ['Reason',        data.blocked_reason || '—'],
+  ];
+  detail.innerHTML = items.map(([k, v]) =>
+    `<div><span class="text-gray-500">${k}:</span> ${v}</div>`
+  ).join('');
+}
+
+function renderNearMisses(list) {
+  const tbody = document.getElementById('near-misses-body');
+  if (!Array.isArray(list) || !list.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="px-4 py-4 text-center text-gray-600">No near-miss bars yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(r => {
+    const pct = r.percent_to_breakout != null ? Number(r.percent_to_breakout).toFixed(2) + '%' : '—';
+    const pctColor = r.percent_to_breakout >= 0 ? 'text-green-400' : 'text-yellow-400';
+    const vr  = r.volume_ratio != null ? Number(r.volume_ratio).toFixed(2) + 'x' : '—';
+    const vrColor = r.volume_ratio >= 1.5 ? 'text-green-400' : r.volume_ratio >= 0.8 ? 'text-yellow-400' : 'text-gray-500';
+    return `<tr class="border-b border-gray-800 hover:bg-gray-800/50">
+      <td class="px-4 py-2 text-gray-400">${fmtTime(r.timestamp)}</td>
+      <td class="px-4 py-2 text-right text-gray-300">${r.close != null ? '$' + Number(r.close).toFixed(2) : '—'}</td>
+      <td class="px-4 py-2 text-right ${pctColor}">${pct}</td>
+      <td class="px-4 py-2 text-right ${vrColor}">${vr}</td>
+      <td class="px-4 py-2 text-gray-500 hidden sm:table-cell">${r.blocked_reason || '—'}</td>
+    </tr>`;
   }).join('');
 }
 

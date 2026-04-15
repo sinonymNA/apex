@@ -178,6 +178,26 @@ def _place_sell_order(qty: int) -> bool:
         return False
 
 
+def _log_near_miss_safe(nm: dict, regime: str, blocked_reason: str, trades_today: int):
+    """Write a near-miss record to DB. Never raises — silently logs errors."""
+    try:
+        db.log_near_miss({
+            "timestamp":           datetime.now(timezone.utc),
+            "symbol":              SYMBOL,  # TODO SPY→ES: update SYMBOL constant
+            "close":               nm.get("close"),
+            "breakout_level":      nm.get("breakout_level"),
+            "percent_to_breakout": nm.get("percent_to_breakout"),
+            "volume":              nm.get("volume"),
+            "required_volume":     nm.get("required_volume"),
+            "volume_ratio":        nm.get("volume_ratio"),
+            "regime":              regime,
+            "blocked_reason":      blocked_reason,
+            "trades_today":        trades_today,
+        })
+    except Exception as e:
+        logger.error(f"Near-miss logging failed (non-fatal): {e}")
+
+
 def _close_position(reason: str, exit_price: float):
     """Close the current position and log the trade."""
     pos = _state["current_position"]
@@ -276,6 +296,9 @@ def five_min_bar_job():
         logger.error(f"compute_indicators error: {e}")
         return
 
+    # ── Evaluate near-miss proximity (non-blocking, used for visibility) ─────
+    _nm = _strategy.evaluate_signal_state(df)
+
     # ── Monitor open position ─────────────────────────────────────────────────
     if _state["current_position"] is not None:
         pos = _state["current_position"]
@@ -308,6 +331,8 @@ def five_min_bar_job():
         if regime in ("Range-Bound", "Extreme Volatility"):
             logger.debug(f"Regime {regime} — no entry")
             db.log_risk_check("regime", "BLOCKED", f"Regime is {regime}")
+            if _nm and _nm["is_near_miss"]:
+                _log_near_miss_safe(_nm, regime, "regime_blocked", _state["trade_count"])
             return
     except Exception as e:
         logger.error(f"Regime classification error: {e}")
@@ -317,6 +342,17 @@ def five_min_bar_job():
     # ── Signal generation ─────────────────────────────────────────────────────
     signal = _strategy.generate_signals(df, now_et, _state["trade_count"])
     if signal is None:
+        if _nm and _nm["is_near_miss"]:
+            t = now_et.time()
+            if not (time(10, 0) <= t < time(15, 30)):
+                _reason = "outside_time_window"
+            elif _state["trade_count"] >= risk.MAX_TRADES_PER_DAY:
+                _reason = "max_trades_reached"
+            elif _nm.get("price_near_miss") and not _nm.get("volume_near_miss"):
+                _reason = "volume_not_met"
+            else:
+                _reason = "breakout_not_met"
+            _log_near_miss_safe(_nm, _state["regime"], _reason, _state["trade_count"])
         return
 
     # ── Risk check ────────────────────────────────────────────────────────────
@@ -331,6 +367,8 @@ def five_min_bar_job():
 
     if not risk_result["approved"]:
         logger.debug(f"Risk check blocked: {risk_result['reason']}")
+        if _nm and _nm["is_near_miss"]:
+            _log_near_miss_safe(_nm, _state["regime"], "risk_blocked", _state["trade_count"])
         return
 
     # ── Place order ───────────────────────────────────────────────────────────

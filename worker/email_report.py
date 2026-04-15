@@ -21,6 +21,7 @@ from worker.db import (
     get_risk_log,
     get_recent_anomalies,
     get_latest_status,
+    get_today_near_misses,
 )
 
 
@@ -46,13 +47,14 @@ def send_daily_report(trade_day_n: int = 1):
     risk_log = get_risk_log(n=30)
     anomalies = get_recent_anomalies(n=10)
     system_status = get_latest_status()
+    near_misses = get_today_near_misses()
 
     pnl = summary.get("gross_pnl", 0.0) if summary else 0.0
     today_str = date.today().isoformat()
 
     subject = f"ATS Daily | {today_str} | P&L: ${pnl:+.0f} | Day {trade_day_n}/20"
 
-    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n)
+    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -71,7 +73,48 @@ def send_daily_report(trade_day_n: int = 1):
         logger.error(f"Failed to send daily email: {e}")
 
 
-def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n) -> str:
+def _build_signal_readiness_section(near_misses: list) -> str:
+    """Build the SIGNAL READINESS HTML block for the daily email."""
+    if not near_misses:
+        return """
+    <h3>SIGNAL READINESS</h3>
+    <p style="color:#888">No near-miss data recorded today.
+    Either no bars were close to triggering, or the pipeline did not run.
+    Check the System Check panel on the dashboard.</p>"""
+
+    # Compute summary stats
+    pcts          = [abs(r.get("percent_to_breakout") or 999) for r in near_misses]
+    vols          = [r.get("volume_ratio") or 0.0 for r in near_misses]
+    regime        = near_misses[0].get("regime", "Unknown")
+    count         = len(near_misses)
+    closest_pct   = min(pcts)
+    strongest_vol = max(vols)
+    reasons       = [r.get("blocked_reason", "") for r in near_misses]
+
+    # Narrative
+    if "regime_blocked" in reasons:
+        narrative = f"A potential setup formed, but the regime filter ({regime}) blocked all entries."
+    elif closest_pct < 0.05:
+        narrative = "Price cleared breakout levels but volume confirmation was insufficient."
+    elif closest_pct < 0.15:
+        narrative = f"Price came very close to breakout ({closest_pct:.2f}% away). Best vol ratio: {strongest_vol:.2f}x."
+    elif closest_pct < 0.3:
+        narrative = f"No valid breakout formed today. Best setup came within {closest_pct:.2f}% of trigger."
+    else:
+        narrative = f"No meaningful breakout attempt observed. Pipeline checked {count} bars."
+
+    return f"""
+    <h3>SIGNAL READINESS</h3>
+    <div>
+      <div class="stat"><div class="stat-val">{closest_pct:.2f}%</div><div class="stat-label">Closest breakout distance</div></div>
+      <div class="stat"><div class="stat-val">{strongest_vol:.2f}x</div><div class="stat-label">Strongest volume ratio</div></div>
+      <div class="stat"><div class="stat-val">{regime}</div><div class="stat-label">Last regime</div></div>
+      <div class="stat"><div class="stat-val">{count}</div><div class="stat-label">Near-miss bars</div></div>
+    </div>
+    <p style="color:#ccc;margin-top:8px">{narrative}</p>"""
+
+
+def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses=None) -> str:
     today_str = date.today().isoformat()
     pnl = summary.get("gross_pnl", 0.0) if summary else 0.0
     pnl_color = "#00c853" if pnl >= 0 else "#d50000"
@@ -210,6 +253,8 @@ def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trad
   <p>Approvals: <strong style="color:#00c853">{approvals}</strong> &nbsp;|&nbsp; Blocks: <strong style="color:#d50000">{blocks}</strong></p>
   <p style="color:#888;font-size:12px">Top block reasons:</p>
   <ul style="font-size:12px">{risk_reasons_html}</ul>
+
+  {_build_signal_readiness_section(near_misses or [])}
 
   <h3>ANOMALIES</h3>
   <table>
