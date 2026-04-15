@@ -93,6 +93,17 @@
 
   <main class="p-4 max-w-7xl mx-auto space-y-4">
 
+    <!-- ── System Check ──────────────────────────────────────────────────── -->
+    <div id="syscheck-panel" class="bg-gray-900 border border-gray-800 rounded-lg">
+      <div class="px-4 py-2 border-b border-gray-800 flex items-center justify-between">
+        <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">System Check</span>
+        <span id="syscheck-summary" class="text-xs text-gray-500">Checking…</span>
+      </div>
+      <div id="syscheck-rows" class="divide-y divide-gray-800/60 text-xs">
+        <div class="px-4 py-3 text-gray-600">Running diagnostics…</div>
+      </div>
+    </div>
+
     <!-- ── Stat cards ──────────────────────────────────────────────────── -->
     <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
       <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
@@ -269,14 +280,15 @@ async function doRefresh() {
   document.getElementById('countdown').textContent = _countdownVal;
   const headers = { 'X-Dashboard-Secret': _secret };
 
-  const [statusRes, summaryRes, tradesRes, gatesRes, riskRes, anomalyRes] =
+  const [statusRes, summaryRes, tradesRes, gatesRes, riskRes, anomalyRes, diagRes] =
     await Promise.allSettled([
-      fetch('/api/status',    { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/summary',   { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/trades',    { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/gates',     { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/risk-log',  { headers }).then(r => r.ok ? r.json() : null),
-      fetch('/api/anomalies', { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/status',      { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/summary',     { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/trades',      { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/gates',       { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/risk-log',    { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/anomalies',   { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/diagnostics', { headers }).then(r => r.ok ? r.json() : null),
     ]);
 
   const val = (res) => res.status === 'fulfilled' ? res.value : null;
@@ -287,6 +299,7 @@ async function doRefresh() {
   renderTrades(val(tradesRes));
   renderRiskLog(val(riskRes));
   renderAnomalies(val(anomalyRes));
+  renderSysCheck(val(diagRes));
 
   const now = new Date();
   document.getElementById('hdr-updated').textContent =
@@ -492,6 +505,54 @@ function renderAnomalies(anomalies) {
       </div>
     </div>
   `).join('');
+}
+
+// ── System Check ─────────────────────────────────────────────────────────────
+const CHECK_LABELS = {
+  database:     'Database',
+  alpaca:       'Alpaca API',
+  worker:       'Trading Worker',
+  regime_model: 'Regime Model',
+  email:        'Email Reports',
+  auth:         'Auth Secret',
+};
+
+function renderSysCheck(data) {
+  const summary = document.getElementById('syscheck-summary');
+  const rows = document.getElementById('syscheck-rows');
+
+  if (!data || !data.checks) {
+    summary.textContent = 'Unavailable';
+    rows.innerHTML = '<div class="px-4 py-3 text-gray-600">Could not reach /api/diagnostics</div>';
+    return;
+  }
+
+  const checks = data.checks;
+  const total = Object.keys(checks).length;
+  const passed = Object.values(checks).filter(c => c.ok).length;
+  const allOk = data.all_ok;
+
+  if (allOk) {
+    summary.innerHTML = '<span class="text-green-400 font-bold">All systems operational ✓</span>';
+  } else {
+    const fails = total - passed;
+    summary.innerHTML = `<span class="text-red-400 font-bold">${fails} issue${fails > 1 ? 's' : ''} found</span>`;
+  }
+
+  rows.innerHTML = Object.entries(checks).map(([key, val]) => {
+    const label = CHECK_LABELS[key] || key;
+    const dot = val.ok
+      ? '<span class="text-green-400 text-base leading-none">●</span>'
+      : '<span class="text-red-400 text-base leading-none animate-pulse">●</span>';
+    const detail = val.ok
+      ? `<span class="text-gray-500">${val.detail || ''}</span>`
+      : `<span class="text-red-400">${val.detail || 'Error'}</span>`;
+    return `<div class="px-4 py-2.5 flex items-center gap-3 hover:bg-gray-800/30">
+      ${dot}
+      <span class="text-gray-300 w-32 shrink-0">${label}</span>
+      ${detail}
+    </div>`;
+  }).join('');
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

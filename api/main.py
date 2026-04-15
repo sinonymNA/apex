@@ -157,6 +157,77 @@ async def get_anomalies(limit: int = Query(default=10, ge=1, le=50)):
     return get_recent_anomalies(n=limit)
 
 
+@app.get("/api/diagnostics", dependencies=[Depends(verify_auth)])
+async def diagnostics():
+    """Full systems check — verifies every component is reachable and configured."""
+    checks = {}
+
+    # 1. Database
+    try:
+        get_latest_status()  # any query works; will return None on empty DB
+        from worker.db import engine
+        with engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+        db_url = os.getenv("DATABASE_URL", "sqlite")
+        db_type = "PostgreSQL" if db_url.startswith("postgres") else "SQLite"
+        checks["database"] = {"ok": True, "detail": f"{db_type} connected"}
+    except Exception as e:
+        checks["database"] = {"ok": False, "detail": str(e)[:120]}
+
+    # 2. Alpaca paper trading API
+    alpaca_key = os.getenv("ALPACA_API_KEY", "")
+    alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
+    if not alpaca_key or not alpaca_secret:
+        checks["alpaca"] = {"ok": False, "detail": "ALPACA_API_KEY / ALPACA_SECRET_KEY not set"}
+    else:
+        try:
+            from alpaca.trading.client import TradingClient
+            client = TradingClient(alpaca_key, alpaca_secret, paper=True)
+            account = client.get_account()
+            equity = float(account.equity)
+            checks["alpaca"] = {
+                "ok": True,
+                "detail": f"Paper account ACTIVE — equity ${equity:,.2f}",
+            }
+        except Exception as e:
+            checks["alpaca"] = {"ok": False, "detail": f"Connection failed: {str(e)[:100]}"}
+
+    # 3. Trading worker thread
+    worker_alive = any(t.name == "apex-trader" for t in threading.enumerate())
+    checks["worker"] = {
+        "ok": worker_alive,
+        "detail": "Scheduler running (will trade Mon–Fri 10:00–15:30 ET)" if worker_alive else "Thread not found — check Railway logs",
+    }
+
+    # 4. Regime model
+    model_ok = _MODEL_PATH.exists()
+    checks["regime_model"] = {
+        "ok": model_ok,
+        "detail": "Model loaded" if model_ok else "Training in background — defaulting to Weak Trend",
+    }
+
+    # 5. Email
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+    notify = os.getenv("NOTIFY_EMAIL", "")
+    email_ok = bool(gmail_user and gmail_pass and notify)
+    if email_ok:
+        checks["email"] = {"ok": True, "detail": f"{gmail_user} → {notify}"}
+    else:
+        missing = [v for v, k in [("GMAIL_USER", gmail_user), ("GMAIL_APP_PASSWORD", gmail_pass), ("NOTIFY_EMAIL", notify)] if not k]
+        checks["email"] = {"ok": False, "detail": f"Missing: {', '.join(missing)}"}
+
+    # 6. Dashboard secret
+    secret_set = bool(os.getenv("DASHBOARD_SECRET"))
+    checks["auth"] = {
+        "ok": secret_set,
+        "detail": "DASHBOARD_SECRET configured" if secret_set else "Not set — anyone can access the dashboard",
+    }
+
+    all_ok = all(v["ok"] for v in checks.values())
+    return {"all_ok": all_ok, "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
 # ── Dashboard catch-all (must be LAST so /api/* routes take precedence) ────────
 @app.get("/", include_in_schema=False)
 async def serve_root():
