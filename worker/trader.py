@@ -470,7 +470,11 @@ def _handle_sigterm(signum, frame):
 def main():
     global _scheduler
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    # SIGTERM handler can only be registered from the main thread.
+    # When running as a background daemon thread (start_background), skip it.
+    import threading as _threading
+    if _threading.current_thread() is _threading.main_thread():
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
     # Initialize DB
     db.init_db()
