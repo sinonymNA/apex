@@ -1,0 +1,4 @@
+# Tell Nixpacks to install Node.js alongside Python.
+# Without this, Railway only installs Python (no npm available for dashboard build).
+[phases.setup]
+nixPkgs = ["nodejs_20"]
