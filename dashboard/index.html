@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Apex Trading System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Courier New', Courier, monospace; }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.08em; }
+    .fade { animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #111827; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+    table { border-collapse: collapse; }
+    td, th { white-space: nowrap; }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            gray: {
+              950: '#030712'
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- ═══════════════════════════ LOGIN ═══════════════════════════════════════ -->
+<div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+  <div class="bg-gray-900 border border-gray-700 rounded-lg p-8 w-full max-w-sm">
+    <div class="text-center mb-8">
+      <div class="text-green-400 text-2xl font-bold tracking-widest mb-1">▲ APEX</div>
+      <div class="text-gray-400 text-xs tracking-widest uppercase">Trading System</div>
+    </div>
+    <div class="mb-4">
+      <label class="block text-gray-400 text-xs uppercase tracking-wider mb-2">Dashboard Secret</label>
+      <input
+        id="secret-input"
+        type="password"
+        placeholder="Enter your DASHBOARD_SECRET"
+        class="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 text-gray-100 text-sm focus:outline-none focus:border-green-500 focus:ring-1 focus:ring-green-500"
+        onkeydown="if(event.key==='Enter') login()"
+      />
+    </div>
+    <button
+      onclick="login()"
+      class="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-4 rounded text-sm tracking-widest uppercase transition-colors"
+    >
+      ENTER
+    </button>
+    <div id="login-error" class="mt-3 text-red-400 text-xs text-center hidden">Invalid secret — try again</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════ DASHBOARD ════════════════════════════════════ -->
+<div id="dashboard" class="hidden min-h-screen">
+
+  <!-- Header -->
+  <header class="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
+    <div class="flex items-center gap-3">
+      <span class="text-green-400 font-bold tracking-widest">▲ APEX</span>
+      <span class="text-gray-500 text-xs hidden sm:inline uppercase tracking-wider">Trading System</span>
+      <span id="hdr-status-badge" class="badge bg-gray-700 text-gray-400">LOADING</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="hdr-updated" class="text-gray-500 text-xs hidden sm:inline"></span>
+      <div id="countdown-wrap" class="text-gray-600 text-xs hidden sm:flex items-center gap-1">
+        <span>refresh in</span>
+        <span id="countdown" class="text-gray-400 w-4 text-right">30</span>
+        <span>s</span>
+      </div>
+      <button
+        onclick="doRefresh()"
+        class="text-gray-400 hover:text-green-400 text-xs uppercase tracking-wider border border-gray-700 hover:border-green-600 rounded px-2 py-1 transition-colors"
+      >
+        ↺ Refresh
+      </button>
+      <button
+        onclick="logout()"
+        class="text-gray-600 hover:text-red-400 text-xs uppercase tracking-wider transition-colors"
+      >
+        Logout
+      </button>
+    </div>
+  </header>
+
+  <main class="p-4 max-w-7xl mx-auto space-y-4">
+
+    <!-- ── Stat cards ──────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Daily P&amp;L</div>
+        <div id="stat-pnl" class="text-xl font-bold text-gray-300">—</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Trades Today</div>
+        <div id="stat-trades" class="text-xl font-bold text-gray-300">—</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Win Rate</div>
+        <div id="stat-winrate" class="text-xl font-bold text-gray-300">—</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Gate Day</div>
+        <div id="stat-gateday" class="text-xl font-bold text-gray-300">—</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Regime</div>
+        <div id="stat-regime" class="text-base font-bold text-gray-300">—</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 rounded-lg p-3">
+        <div class="text-gray-500 text-xs uppercase tracking-wider mb-1">Kill Switch</div>
+        <div id="stat-ks" class="text-xl font-bold text-gray-300">—</div>
+      </div>
+    </div>
+
+    <!-- ── Gates ──────────────────────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-lg">
+      <div class="px-4 py-2 border-b border-gray-800 flex items-center justify-between">
+        <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">Evaluation Gates</span>
+        <span id="gates-day-label" class="text-gray-500 text-xs"></span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="border-b border-gray-800 text-gray-500 uppercase tracking-wider">
+              <th class="text-left px-4 py-2">Gate</th>
+              <th class="text-right px-4 py-2">Value</th>
+              <th class="text-right px-4 py-2">Target</th>
+              <th class="text-right px-4 py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody id="gates-body">
+            <tr><td colspan="4" class="px-4 py-4 text-center text-gray-600">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Recent Trades ───────────────────────────────────────────────── -->
+    <div class="bg-gray-900 border border-gray-800 rounded-lg">
+      <div class="px-4 py-2 border-b border-gray-800">
+        <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">Recent Trades</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs">
+          <thead>
+            <tr class="border-b border-gray-800 text-gray-500 uppercase tracking-wider">
+              <th class="text-left px-4 py-2">Time</th>
+              <th class="text-left px-4 py-2">Side</th>
+              <th class="text-right px-4 py-2">Entry</th>
+              <th class="text-right px-4 py-2">Exit</th>
+              <th class="text-right px-4 py-2">P&amp;L ($)</th>
+              <th class="text-right px-4 py-2">P&amp;L (R)</th>
+              <th class="text-left px-4 py-2 hidden md:table-cell">Regime</th>
+              <th class="text-left px-4 py-2 hidden lg:table-cell">Reason</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body">
+            <tr><td colspan="8" class="px-4 py-4 text-center text-gray-600">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Risk Log + Anomalies side by side on large screens ─────────── -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+      <!-- Risk Log -->
+      <div class="bg-gray-900 border border-gray-800 rounded-lg">
+        <div class="px-4 py-2 border-b border-gray-800">
+          <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">Risk Log</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="border-b border-gray-800 text-gray-500 uppercase tracking-wider">
+                <th class="text-left px-4 py-2">Time</th>
+                <th class="text-left px-4 py-2">Check</th>
+                <th class="text-right px-4 py-2">Result</th>
+                <th class="text-left px-4 py-2 hidden md:table-cell">Reason</th>
+              </tr>
+            </thead>
+            <tbody id="risk-body">
+              <tr><td colspan="4" class="px-4 py-4 text-center text-gray-600">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Anomalies -->
+      <div class="bg-gray-900 border border-gray-800 rounded-lg">
+        <div class="px-4 py-2 border-b border-gray-800">
+          <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">Anomalies</span>
+        </div>
+        <div id="anomalies-list" class="divide-y divide-gray-800">
+          <div class="px-4 py-4 text-center text-gray-600 text-xs">Loading…</div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<!-- ═══════════════════════════ SCRIPT ═══════════════════════════════════════ -->
+<script>
+'use strict';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let _secret = '';
+let _refreshTimer = null;
+let _countdownTimer = null;
+let _countdownVal = 30;
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+function login() {
+  const input = document.getElementById('secret-input');
+  _secret = input.value.trim();
+  localStorage.setItem('apex_secret', _secret);
+  showDashboard();
+  doRefresh();
+}
+
+function logout() {
+  localStorage.removeItem('apex_secret');
+  _secret = '';
+  clearInterval(_refreshTimer);
+  clearInterval(_countdownTimer);
+  document.getElementById('dashboard').classList.add('hidden');
+  document.getElementById('login-screen').classList.remove('hidden');
+  document.getElementById('secret-input').value = '';
+  document.getElementById('login-error').classList.add('hidden');
+}
+
+function showDashboard() {
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  document.getElementById('countdown-wrap').classList.remove('hidden');
+  startAutoRefresh();
+}
+
+// ── Refresh loop ──────────────────────────────────────────────────────────────
+function startAutoRefresh() {
+  clearInterval(_refreshTimer);
+  clearInterval(_countdownTimer);
+  _countdownVal = 30;
+  document.getElementById('countdown').textContent = _countdownVal;
+
+  _refreshTimer = setInterval(() => {
+    doRefresh();
+    _countdownVal = 30;
+  }, 30000);
+
+  _countdownTimer = setInterval(() => {
+    _countdownVal = Math.max(0, _countdownVal - 1);
+    document.getElementById('countdown').textContent = _countdownVal;
+  }, 1000);
+}
+
+async function doRefresh() {
+  _countdownVal = 30;
+  document.getElementById('countdown').textContent = _countdownVal;
+  const headers = { 'X-Dashboard-Secret': _secret };
+
+  const [statusRes, summaryRes, tradesRes, gatesRes, riskRes, anomalyRes] =
+    await Promise.allSettled([
+      fetch('/api/status',    { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/summary',   { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/trades',    { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/gates',     { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/risk-log',  { headers }).then(r => r.ok ? r.json() : null),
+      fetch('/api/anomalies', { headers }).then(r => r.ok ? r.json() : null),
+    ]);
+
+  const val = (res) => res.status === 'fulfilled' ? res.value : null;
+
+  renderHeader(val(statusRes));
+  renderStats(val(statusRes), val(summaryRes));
+  renderGates(val(gatesRes), val(statusRes));
+  renderTrades(val(tradesRes));
+  renderRiskLog(val(riskRes));
+  renderAnomalies(val(anomalyRes));
+
+  const now = new Date();
+  document.getElementById('hdr-updated').textContent =
+    'Updated ' + now.toLocaleTimeString('en-US', { hour12: false });
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmt$(n) {
+  if (n == null) return '—';
+  const v = Number(n);
+  const color = v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-300';
+  return `<span class="${color}">${v >= 0 ? '+' : ''}$${Math.abs(v).toFixed(2)}</span>`;
+}
+
+function fmtR(n) {
+  if (n == null) return '—';
+  const v = Number(n);
+  const color = v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-300';
+  return `<span class="${color}">${v >= 0 ? '+' : ''}${v.toFixed(2)}R</span>`;
+}
+
+function fmtPct(n) {
+  if (n == null) return '—';
+  const v = Number(n) * (n <= 1 ? 100 : 1);
+  const color = v >= 50 ? 'text-green-400' : v >= 38 ? 'text-yellow-400' : 'text-red-400';
+  return `<span class="${color}">${v.toFixed(1)}%</span>`;
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  } catch { return ts; }
+}
+
+function statusBadge(s) {
+  if (!s) return '<span class="badge bg-gray-700 text-gray-400">—</span>';
+  const up = (s || '').toUpperCase();
+  if (up.includes('KILL')) return `<span class="badge bg-red-900 text-red-300">${up}</span>`;
+  if (up === 'RUNNING') return `<span class="badge bg-green-900 text-green-300">RUNNING</span>`;
+  if (up === 'PAUSED') return `<span class="badge bg-yellow-900 text-yellow-300">PAUSED</span>`;
+  return `<span class="badge bg-gray-700 text-gray-300">${up}</span>`;
+}
+
+function regimeColor(r) {
+  if (!r) return 'text-gray-400';
+  const up = r.toUpperCase();
+  if (up.includes('STRONG')) return 'text-green-400';
+  if (up.includes('WEAK')) return 'text-blue-400';
+  if (up.includes('RANGE')) return 'text-yellow-400';
+  if (up.includes('HIGH')) return 'text-orange-400';
+  if (up.includes('EXTREME')) return 'text-red-400';
+  return 'text-gray-300';
+}
+
+function gateDot(status) {
+  if (!status) return '<span class="text-gray-600">●</span>';
+  const up = status.toUpperCase();
+  if (up === 'PASS' || up === 'PASSED') return '<span class="text-green-400">●</span>';
+  if (up === 'FAIL' || up === 'FAILED') return '<span class="text-red-400">●</span>';
+  return '<span class="text-yellow-400">●</span>';
+}
+
+function severityBadge(sev) {
+  const up = (sev || 'INFO').toUpperCase();
+  if (up === 'CRITICAL') return '<span class="badge bg-red-900 text-red-300">CRITICAL</span>';
+  if (up === 'WARNING') return '<span class="badge bg-yellow-900 text-yellow-300">WARNING</span>';
+  return '<span class="badge bg-gray-700 text-gray-400">INFO</span>';
+}
+
+// ── Render functions ──────────────────────────────────────────────────────────
+function renderHeader(status) {
+  const ws = status && (status.worker_status || status.status);
+  document.getElementById('hdr-status-badge').outerHTML =
+    `<span id="hdr-status-badge">${statusBadge(ws || 'LOADING')}</span>`;
+}
+
+function renderStats(status, summary) {
+  // P&L
+  const pnl = summary && (summary.total_pnl ?? summary.pnl);
+  document.getElementById('stat-pnl').innerHTML = fmt$(pnl);
+
+  // Trades
+  const tc = summary && (summary.total_trades ?? summary.trade_count);
+  document.getElementById('stat-trades').textContent = tc != null ? tc : '—';
+
+  // Win rate
+  const wr = summary && (summary.win_rate ?? summary.winrate);
+  document.getElementById('stat-winrate').innerHTML = fmtPct(wr);
+
+  // Gate day
+  const gd = status && (status.gate_day ?? status.trading_day);
+  document.getElementById('stat-gateday').innerHTML =
+    gd != null ? `<span class="text-gray-300">${gd}<span class="text-gray-600">/20</span></span>` : '—';
+
+  // Regime
+  const regime = status && status.regime;
+  const rc = regimeColor(regime);
+  document.getElementById('stat-regime').innerHTML =
+    regime ? `<span class="${rc}">${regime}</span>` : '<span class="text-gray-500">—</span>';
+
+  // Kill switch
+  const ks = status && status.kill_switch_active;
+  document.getElementById('stat-ks').innerHTML =
+    ks == null
+      ? '<span class="text-gray-500">—</span>'
+      : ks
+        ? '<span class="text-red-400">ON</span>'
+        : '<span class="text-green-400">OFF</span>';
+}
+
+const GATE_DEFS = [
+  { key: 'net_return',      label: 'Net Return',        target: '> 0%',     fmt: v => fmtPct(v) },
+  { key: 'risk_violations', label: 'Risk Violations',   target: '< 3',      fmt: v => v != null ? `<span class="${v < 3 ? 'text-green-400' : 'text-red-400'}">${v}</span>` : '—' },
+  { key: 'max_drawdown',    label: 'Max Drawdown',      target: '> -$8000', fmt: v => fmt$(v) },
+  { key: 'win_rate',        label: 'Win Rate',          target: '> 38%',    fmt: v => fmtPct(v) },
+  { key: 'avg_slippage',    label: 'Avg Slippage',      target: '< $0.10',  fmt: v => v != null ? `$${Number(v).toFixed(3)}` : '—' },
+];
+
+function renderGates(gates, status) {
+  const gd = status && (status.gate_day ?? status.trading_day);
+  const lbl = document.getElementById('gates-day-label');
+  lbl.textContent = gd != null ? `Day ${gd} of 20` : '';
+
+  const tbody = document.getElementById('gates-body');
+  if (!gates || typeof gates !== 'object' || gates.message) {
+    tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-4 text-center text-gray-600 text-xs">No gate data yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = GATE_DEFS.map(def => {
+    const v = gates[def.key];
+    const st = gates[def.key + '_status'] || gates['status_' + def.key];
+    return `<tr class="border-b border-gray-800 hover:bg-gray-800/50">
+      <td class="px-4 py-2 text-gray-300">${def.label}</td>
+      <td class="px-4 py-2 text-right">${def.fmt(v)}</td>
+      <td class="px-4 py-2 text-right text-gray-600">${def.target}</td>
+      <td class="px-4 py-2 text-right">${gateDot(st)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderTrades(trades) {
+  const tbody = document.getElementById('trades-body');
+  const list = Array.isArray(trades) ? trades : [];
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="px-4 py-6 text-center text-gray-600 text-xs">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(t => {
+    const side = (t.side || '').toUpperCase();
+    const sideColor = side === 'LONG' ? 'text-green-400' : side === 'SHORT' ? 'text-red-400' : 'text-gray-400';
+    return `<tr class="border-b border-gray-800 hover:bg-gray-800/50">
+      <td class="px-4 py-2 text-gray-400">${fmtTime(t.exit_time || t.entry_time)}</td>
+      <td class="px-4 py-2 ${sideColor}">${side || '—'}</td>
+      <td class="px-4 py-2 text-right text-gray-300">${t.entry_price != null ? '$' + Number(t.entry_price).toFixed(2) : '—'}</td>
+      <td class="px-4 py-2 text-right text-gray-300">${t.exit_price != null ? '$' + Number(t.exit_price).toFixed(2) : '—'}</td>
+      <td class="px-4 py-2 text-right">${fmt$(t.pnl_dollar ?? t.pnl)}</td>
+      <td class="px-4 py-2 text-right">${fmtR(t.pnl_r)}</td>
+      <td class="px-4 py-2 text-gray-400 hidden md:table-cell">${t.regime || '—'}</td>
+      <td class="px-4 py-2 text-gray-500 hidden lg:table-cell max-w-32 truncate">${t.exit_reason || t.reason || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderRiskLog(log) {
+  const tbody = document.getElementById('risk-body');
+  const list = Array.isArray(log) ? log : [];
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-6 text-center text-gray-600 text-xs">No risk checks yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.slice(0, 20).map(r => {
+    const approved = r.result === true || r.result === 'approved' || r.approved === true;
+    const dot = approved
+      ? '<span class="text-green-400">●</span>'
+      : '<span class="text-red-400">●</span>';
+    return `<tr class="border-b border-gray-800 hover:bg-gray-800/50">
+      <td class="px-4 py-2 text-gray-400">${fmtTime(r.timestamp || r.created_at)}</td>
+      <td class="px-4 py-2 text-gray-300">${r.check_type || r.type || '—'}</td>
+      <td class="px-4 py-2 text-right">${dot}</td>
+      <td class="px-4 py-2 text-gray-500 hidden md:table-cell max-w-40 truncate">${r.reason || '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAnomalies(anomalies) {
+  const container = document.getElementById('anomalies-list');
+  const list = Array.isArray(anomalies) ? anomalies : [];
+  if (!list.length) {
+    container.innerHTML = '<div class="px-4 py-6 text-center text-gray-600 text-xs">No anomalies detected</div>';
+    return;
+  }
+  container.innerHTML = list.map(a => `
+    <div class="px-4 py-3 hover:bg-gray-800/30">
+      <div class="flex items-start gap-2">
+        ${severityBadge(a.severity)}
+        <div class="flex-1 min-w-0">
+          <div class="text-gray-300 text-xs truncate">${a.message || a.diagnosis || '—'}</div>
+          ${a.recommendation ? `<div class="text-gray-600 text-xs mt-0.5 truncate">${a.recommendation}</div>` : ''}
+        </div>
+        <div class="text-gray-600 text-xs shrink-0">${fmtTime(a.timestamp || a.created_at)}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(function init() {
+  const saved = localStorage.getItem('apex_secret');
+  if (saved !== null) {
+    _secret = saved;
+    showDashboard();
+    doRefresh();
+  }
+})();
+</script>
+</body>
+</html>

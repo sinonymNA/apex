@@ -22,7 +22,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from loguru import logger
 
 # load_dotenv BEFORE any internal imports that create DB engines at import time
@@ -40,7 +40,7 @@ from worker.db import (  # noqa: E402
 
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 _MODEL_PATH = Path(__file__).parent.parent / "models" / "regime_rf.pkl"
-_DASHBOARD_BUILD = Path(__file__).parent.parent / "dashboard" / "build"
+_DASHBOARD_HTML = Path(__file__).parent.parent / "dashboard" / "index.html"
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -103,12 +103,11 @@ async def startup_event():
     # 3. Start trading worker (also non-blocking)
     threading.Thread(target=_start_worker, daemon=True, name="worker-launcher").start()
 
-    # 4. Mount React dashboard as static files (if built)
-    if _DASHBOARD_BUILD.exists():
-        app.mount("/", StaticFiles(directory=str(_DASHBOARD_BUILD), html=True), name="dashboard")
-        logger.info("Dashboard static files mounted at /")
+    # 4. Log whether dashboard HTML is present
+    if _DASHBOARD_HTML.exists():
+        logger.info("Dashboard HTML found — serving at /")
     else:
-        logger.info("No dashboard build found — serving API only")
+        logger.warning("dashboard/index.html not found — GET / will return 404")
 
     logger.info("Apex Trading System API ready")
 
@@ -121,7 +120,7 @@ async def health():
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model_ready": _MODEL_PATH.exists(),
-        "dashboard_built": _DASHBOARD_BUILD.exists(),
+        "dashboard_ready": _DASHBOARD_HTML.exists(),
     }
 
 
@@ -156,3 +155,18 @@ async def get_risk_log_route(limit: int = Query(default=20, ge=1, le=100)):
 @app.get("/api/anomalies", dependencies=[Depends(verify_auth)])
 async def get_anomalies(limit: int = Query(default=10, ge=1, le=50)):
     return get_recent_anomalies(n=limit)
+
+
+# ── Dashboard catch-all (must be LAST so /api/* routes take precedence) ────────
+@app.get("/", include_in_schema=False)
+async def serve_root():
+    if _DASHBOARD_HTML.exists():
+        return FileResponse(str(_DASHBOARD_HTML))
+    return {"message": "Apex Trading System — place dashboard/index.html to serve the UI"}
+
+
+@app.get("/{path:path}", include_in_schema=False)
+async def serve_spa(path: str):
+    if _DASHBOARD_HTML.exists():
+        return FileResponse(str(_DASHBOARD_HTML))
+    raise HTTPException(status_code=404, detail="Not found")
