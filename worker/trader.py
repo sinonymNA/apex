@@ -2,7 +2,7 @@
 worker/trader.py — Main trading worker for Apex Trading System.
 
 Runs Monday-Friday 9:25 AM - 4:05 PM ET using APScheduler.
-Fetches SPY bars from yfinance, runs MomentumBreakout strategy,
+Fetches SPY bars from Alpaca (yfinance fallback), runs MomentumBreakout strategy,
 checks regime and risk, places paper orders via Alpaca, and logs everything.
 
 Deploy as a Railway worker process. Handles SIGTERM gracefully.
@@ -85,32 +85,72 @@ def _is_session_hours() -> bool:
     return SESSION_START <= t <= SESSION_END
 
 
-def _fetch_bars():
-    """Fetch recent SPY 5-minute bars from yfinance."""
+def _fetch_bars_alpaca() -> "pd.DataFrame | None":
+    """Fetch 5-min SPY bars from Alpaca market data API (primary source)."""
+    import pandas as pd
+    api_key = os.getenv("ALPACA_API_KEY", "")
+    secret_key = os.getenv("ALPACA_SECRET_KEY", os.getenv("ALPACA_API_SECRET", ""))
+    if not api_key or not secret_key:
+        return None
     try:
-        df = yf.download(
-            SYMBOL,
-            period="2d",
-            interval="5m",
-            auto_adjust=True,
-            progress=False,
-            # Suppress yfinance multi-level column warning
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from datetime import timedelta
+
+        client = StockHistoricalDataClient(api_key, secret_key)
+        start = datetime.now(timezone.utc) - timedelta(days=5)
+        req = StockBarsRequest(
+            symbol_or_symbols=SYMBOL,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=start,
         )
+        bars = client.get_stock_bars(req)
+        df = bars.df
         if df.empty:
-            logger.warning("yfinance returned empty DataFrame")
             return None
-        # Handle multi-level columns from yfinance (field/ticker level order varies by version)
+        # Strip symbol level from MultiIndex (symbol, timestamp) → timestamp index
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.xs(SYMBOL, level="symbol")
+        # Alpaca returns lowercase; rename to standard uppercase OHLCV
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                 "close": "Close", "volume": "Volume"})
+        df = df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
+        return df if len(df) >= 30 else None
+    except Exception as e:
+        logger.warning(f"Alpaca data fetch failed: {e}")
+        return None
+
+
+def _fetch_bars_yfinance() -> "pd.DataFrame | None":
+    """Fetch 5-min SPY bars from yfinance (fallback)."""
+    try:
+        df = yf.download(SYMBOL, period="2d", interval="5m",
+                         auto_adjust=True, progress=False)
+        if df.empty:
+            return None
         if hasattr(df.columns, "levels"):
-            # Find the level that contains OHLCV field names (not ticker names)
             for _lvl in range(df.columns.nlevels):
                 _candidate = df.columns.get_level_values(_lvl)
                 if "Close" in _candidate:
                     df.columns = _candidate
                     break
-        return df
+        return df if len(df) >= 30 else None
     except Exception as e:
-        logger.error(f"Failed to fetch bars: {e}")
+        logger.warning(f"yfinance fetch failed: {e}")
         return None
+
+
+def _fetch_bars():
+    """Fetch recent SPY 5-minute bars. Tries Alpaca first, falls back to yfinance."""
+    df = _fetch_bars_alpaca()
+    if df is not None:
+        return df
+    logger.warning("Alpaca data unavailable — trying yfinance fallback")
+    df = _fetch_bars_yfinance()
+    if df is None:
+        logger.error("Both Alpaca and yfinance data sources failed")
+    return df
 
 
 def _place_buy_order(signal: dict) -> dict | None:
