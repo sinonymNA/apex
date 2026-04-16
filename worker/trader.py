@@ -611,6 +611,28 @@ def noon_update_job():
 
 
 # ── Startup & shutdown ────────────────────────────────────────────────────────
+def _startup_catchup():
+    """On boot, immediately send any email whose window already opened today."""
+    now = _now_et()
+    if now.weekday() >= 5:   # weekend — no emails
+        return
+    t = now.time()
+    # Morning brief window: 9:25 AM – 11:59 AM
+    if time(9, 25) <= t < time(12, 0):
+        logger.info("Startup catch-up: sending morning brief")
+        try:
+            morning_brief_job()
+        except Exception as e:
+            logger.error(f"Startup morning brief failed: {e}")
+    # EOD window: 4:05 PM – midnight
+    elif t >= time(16, 5):
+        logger.info("Startup catch-up: sending EOD report")
+        try:
+            end_of_day_job()
+        except Exception as e:
+            logger.error(f"Startup EOD failed: {e}")
+
+
 def _handle_sigterm(signum, frame):
     """Graceful shutdown on SIGTERM."""
     logger.info("SIGTERM received — shutting down gracefully")
@@ -640,6 +662,7 @@ def main():
         logger.info("Run `python backtest/run.py` to train and save the model")
 
     logger.info("Apex Trading Worker starting...")
+    _startup_catchup()
 
     _scheduler = BlockingScheduler(timezone="America/New_York")
 
@@ -674,7 +697,7 @@ def main():
         CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
         id="morning_brief",
         name="Morning Brief Email",
-        misfire_grace_time=120,
+        misfire_grace_time=7200,  # fire if within 2 hours of scheduled time
     )
 
     # Noon update email at 12:00 PM ET Mon-Fri
@@ -683,7 +706,7 @@ def main():
         CronTrigger(day_of_week="mon-fri", hour=12, minute=0),
         id="noon_update",
         name="Noon Update Email",
-        misfire_grace_time=120,
+        misfire_grace_time=7200,
     )
 
     # End of day at 4:05 PM ET Mon-Fri
@@ -692,6 +715,7 @@ def main():
         CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
         id="end_of_day",
         name="End of Day",
+        misfire_grace_time=14400,  # fire if within 4 hours of scheduled time
     )
 
     logger.info(
