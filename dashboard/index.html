@@ -98,7 +98,13 @@
     <div id="syscheck-panel" class="bg-gray-900 border border-gray-800 rounded-lg">
       <div class="px-4 py-2 border-b border-gray-800 flex items-center justify-between">
         <span class="text-xs uppercase tracking-wider text-gray-400 font-bold">System Check</span>
-        <span id="syscheck-summary" class="text-xs text-gray-500">Checking…</span>
+        <div class="flex items-center gap-2">
+          <button id="test-email-btn" onclick="sendTestEmail()"
+            class="text-gray-500 hover:text-blue-400 text-xs border border-gray-700 hover:border-blue-600 rounded px-2 py-0.5 transition-colors">
+            Test Email
+          </button>
+          <span id="syscheck-summary" class="text-xs text-gray-500">Checking…</span>
+        </div>
       </div>
       <div id="syscheck-rows" class="divide-y divide-gray-800/60 text-xs">
         <div class="px-4 py-3 text-gray-600">Running diagnostics…</div>
@@ -679,6 +685,36 @@ function renderNearMisses(list) {
       <td class="px-4 py-2 text-gray-500 hidden sm:table-cell">${r.blocked_reason || '—'}</td>
     </tr>`;
   }).join('');
+}
+
+// ── Test Email ────────────────────────────────────────────────────────────────
+async function sendTestEmail() {
+  const btn = document.getElementById('test-email-btn');
+  btn.textContent = 'Sending…';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/debug/send-test-email', {
+      method: 'POST',
+      headers: { 'X-Dashboard-Secret': _secret },
+    });
+    const data = await r.json();
+    if (data.ok) {
+      btn.textContent = 'Sent ✓';
+      btn.className = btn.className.replace('text-gray-500', 'text-green-400').replace('hover:text-blue-400', '');
+    } else {
+      btn.textContent = 'Failed ✗';
+      btn.className = btn.className.replace('text-gray-500', 'text-red-400').replace('hover:text-blue-400', '');
+      alert('Email failed: ' + (data.error || 'Unknown error'));
+    }
+  } catch (e) {
+    btn.textContent = 'Error';
+    btn.className = btn.className.replace('text-gray-500', 'text-red-400').replace('hover:text-blue-400', '');
+  }
+  setTimeout(() => {
+    btn.textContent = 'Test Email';
+    btn.disabled = false;
+    btn.className = 'text-gray-500 hover:text-blue-400 text-xs border border-gray-700 hover:border-blue-600 rounded px-2 py-0.5 transition-colors';
+  }, 5000);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

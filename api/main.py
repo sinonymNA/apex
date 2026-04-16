@@ -271,6 +271,45 @@ async def get_near_misses(limit: int = Query(default=20, ge=1, le=100)):
     return get_recent_near_misses(n=limit)
 
 
+@app.post("/api/debug/send-test-email", dependencies=[Depends(verify_auth)])
+async def send_test_email():
+    """Send a test email immediately to verify Gmail config is working."""
+    import os, smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+    notify     = os.getenv("NOTIFY_EMAIL", gmail_user)
+
+    if not gmail_user or not gmail_pass:
+        return {"ok": False, "error": "GMAIL_USER or GMAIL_APP_PASSWORD not set in Railway Variables"}
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "Apex Trading System — Test Email ✓"
+        msg["From"]    = gmail_user
+        msg["To"]      = notify
+        body = """<html><body style="font-family:monospace;background:#0d0d0d;color:#e0e0e0;padding:20px">
+<h2 style="color:#00e676">▲ APEX — Email Test</h2>
+<p>If you received this, your email configuration is working correctly.</p>
+<p style="color:#888">Daily reports will be sent at 4:05 PM ET each trading day.</p>
+</body></html>"""
+        msg.attach(MIMEText(body, "html"))
+
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, notify, msg.as_string())
+
+        logger.info(f"Test email sent to {notify}")
+        return {"ok": True, "sent_to": notify}
+    except Exception as e:
+        logger.error(f"Test email failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 # ── Dashboard catch-all (must be LAST so /api/* routes take precedence) ────────
 @app.get("/", include_in_schema=False)
 async def serve_root():
