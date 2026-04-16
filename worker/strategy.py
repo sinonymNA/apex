@@ -42,7 +42,7 @@ class MomentumBreakout:
     STOP_ATR = 1.0
     TARGET_ATR = 2.0
     MAX_HOLD_MINUTES = 240
-    ENTRY_START = time(10, 0)
+    ENTRY_START = time(9, 30)
     ENTRY_END = time(15, 30)
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:

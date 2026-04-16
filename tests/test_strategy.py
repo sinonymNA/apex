@@ -128,18 +128,19 @@ class TestComputeIndicators:
 
 # ── generate_signals time blackout tests ─────────────────────────────────────
 class TestGenerateSignalsTimeBlackout:
-    def test_none_before_10am(self):
+    def test_none_before_930am(self):
+        # Entry window starts at 9:30 AM ET
         strat = MomentumBreakout()
         df = make_breakout_df(n=60)
         df = strat.compute_indicators(df)
-        result = strat.generate_signals(df, make_et(9, 30), trades_today=0)
+        result = strat.generate_signals(df, make_et(9, 0), trades_today=0)
         assert result is None
 
-    def test_none_at_9_59am(self):
+    def test_none_at_929am(self):
         strat = MomentumBreakout()
         df = make_breakout_df(n=60)
         df = strat.compute_indicators(df)
-        result = strat.generate_signals(df, make_et(9, 59), trades_today=0)
+        result = strat.generate_signals(df, make_et(9, 29), trades_today=0)
         assert result is None
 
     def test_none_after_3_30pm(self):

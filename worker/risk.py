@@ -89,10 +89,10 @@ def pre_trade_check(
     if trade_count >= MAX_TRADES_PER_DAY:
         return {"approved": False, "reason": f"Max trades per day reached ({trade_count}/{MAX_TRADES_PER_DAY})"}
 
-    # 3. Time window — before 10:00 AM ET
+    # 3. Time window — before 9:30 AM ET (market open)
     t = time_et.time() if hasattr(time_et, "time") else time_et
-    if t < time(10, 0):
-        return {"approved": False, "reason": f"Too early — market opens at 10:00 AM ET (current: {t.strftime('%H:%M')})"}
+    if t < time(9, 30):
+        return {"approved": False, "reason": f"Too early — market opens at 9:30 AM ET (current: {t.strftime('%H:%M')})"}
 
     # 4. Time window — after 3:30 PM ET
     if t >= time(15, 30):

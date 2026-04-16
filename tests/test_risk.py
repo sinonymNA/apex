@@ -150,35 +150,35 @@ class TestTradeCountMax:
 
 
 class TestTimeBlackout:
-    def test_blocks_before_10am(self):
+    def test_blocks_before_930am(self):
+        # Entry window starts at 9:30 AM ET (market open)
+        result = pre_trade_check(
+            daily_pnl=0.0,
+            trade_count=0,
+            time_et=make_et(9, 0),
+            consecutive_losses=0,
+        )
+        assert result["approved"] is False
+        assert "early" in result["reason"].lower()
+
+    def test_blocks_at_exactly_930am_minus_1_min(self):
+        result = pre_trade_check(
+            daily_pnl=0.0,
+            trade_count=0,
+            time_et=make_et(9, 29),
+            consecutive_losses=0,
+        )
+        assert result["approved"] is False
+
+    def test_allows_at_930am(self):
         result = pre_trade_check(
             daily_pnl=0.0,
             trade_count=0,
             time_et=make_et(9, 30),
             consecutive_losses=0,
         )
-        assert result["approved"] is False
-        assert "early" in result["reason"].lower() or "10" in result["reason"]
-
-    def test_blocks_at_exactly_10am_minus_1_min(self):
-        result = pre_trade_check(
-            daily_pnl=0.0,
-            trade_count=0,
-            time_et=make_et(9, 59),
-            consecutive_losses=0,
-        )
-        assert result["approved"] is False
-
-    def test_allows_at_10am(self):
-        result = pre_trade_check(
-            daily_pnl=0.0,
-            trade_count=0,
-            time_et=make_et(10, 0),
-            consecutive_losses=0,
-        )
         # Should not be blocked by the time check
         assert "early" not in result["reason"].lower()
-        assert "10" not in result["reason"] or result["approved"] is True
 
     def test_blocks_after_3_30pm(self):
         result = pre_trade_check(

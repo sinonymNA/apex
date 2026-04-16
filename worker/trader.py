@@ -28,7 +28,7 @@ load_dotenv()
 # Internal imports (after load_dotenv so DATABASE_URL is set)
 from worker import db, risk
 from worker.strategy import MomentumBreakout
-from worker.email_report import send_daily_report
+from worker.email_report import send_daily_report, send_morning_brief, send_noon_update
 from diagnostics.analyzer import analyze_anomaly
 from models.regime_classifier import RegimeClassifier
 
@@ -344,7 +344,7 @@ def five_min_bar_job():
     if signal is None:
         if _nm:  # log every bar so Last Signal Check always has data
             t = now_et.time()
-            if not (time(10, 0) <= t < time(15, 30)):
+            if not (time(9, 30) <= t < time(15, 30)):
                 _reason = "outside_time_window"
             elif _state["trade_count"] >= risk.MAX_TRADES_PER_DAY:
                 _reason = "max_trades_reached"
@@ -497,6 +497,60 @@ def end_of_day_job():
     )
 
 
+def morning_brief_job():
+    """9:25 AM ET Mon-Fri: fetch indicators and send the morning briefing email."""
+    try:
+        df = _fetch_bars()
+        if df is None or len(df) < 30:
+            logger.warning("Morning brief: insufficient bar data")
+            return
+        df_ind = _strategy.compute_indicators(df)
+        regime = _classifier.classify(df_ind)
+        _state["regime"] = regime
+
+        valid = df_ind.dropna(subset=["high_20", "atr14"])
+        if valid.empty:
+            logger.warning("Morning brief: no valid indicator rows")
+            return
+        last          = valid.iloc[-1]
+        spy_price     = float(last["Close"])
+        breakout_level = float(last["high_20"])
+        atr           = float(last["atr14"])
+
+        send_morning_brief(
+            session_day=_state["session_day"],
+            regime=regime,
+            spy_price=spy_price,
+            breakout_level=breakout_level,
+            atr=atr,
+        )
+    except Exception as e:
+        logger.error(f"Morning brief job failed: {e}")
+
+
+def noon_update_job():
+    """12:00 PM ET Mon-Fri: send midday status update email."""
+    try:
+        df = _fetch_bars()
+        spy_price = 0.0
+        if df is not None and not df.empty:
+            spy_price = float(df["Close"].iloc[-1])
+
+        near_misses_am = db.get_today_near_misses()
+
+        send_noon_update(
+            session_day=_state["session_day"],
+            daily_pnl=_state["daily_pnl"],
+            trade_count=_state["trade_count"],
+            regime=_state["regime"],
+            spy_price=spy_price,
+            in_position=_state["current_position"] is not None,
+            near_misses_am=near_misses_am,
+        )
+    except Exception as e:
+        logger.error(f"Noon update job failed: {e}")
+
+
 # ── Startup & shutdown ────────────────────────────────────────────────────────
 def _handle_sigterm(signum, frame):
     """Graceful shutdown on SIGTERM."""
@@ -553,6 +607,24 @@ def main():
         CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
         id="market_open",
         name="Market Open Reset",
+    )
+
+    # Morning brief email at 9:25 AM ET Mon-Fri
+    _scheduler.add_job(
+        morning_brief_job,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
+        id="morning_brief",
+        name="Morning Brief Email",
+        misfire_grace_time=120,
+    )
+
+    # Noon update email at 12:00 PM ET Mon-Fri
+    _scheduler.add_job(
+        noon_update_job,
+        CronTrigger(day_of_week="mon-fri", hour=12, minute=0),
+        id="noon_update",
+        name="Noon Update Email",
+        misfire_grace_time=120,
     )
 
     # End of day at 4:05 PM ET Mon-Fri

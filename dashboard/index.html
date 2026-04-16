@@ -690,31 +690,49 @@ function renderNearMisses(list) {
 // ── Test Email ────────────────────────────────────────────────────────────────
 async function sendTestEmail() {
   const btn = document.getElementById('test-email-btn');
+  const resetBtn = () => {
+    btn.textContent = 'Test Email';
+    btn.disabled = false;
+    btn.className = 'text-gray-500 hover:text-blue-400 text-xs border border-gray-700 hover:border-blue-600 rounded px-2 py-0.5 transition-colors';
+  };
   btn.textContent = 'Sending…';
   btn.disabled = true;
+
+  // 35s timeout — SMTP takes up to 30s to fail
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 35000);
+
   try {
     const r = await fetch('/api/debug/send-test-email', {
       method: 'POST',
       headers: { 'X-Dashboard-Secret': _secret },
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     const data = await r.json();
     if (data.ok) {
       btn.textContent = 'Sent ✓';
-      btn.className = btn.className.replace('text-gray-500', 'text-green-400').replace('hover:text-blue-400', '');
+      btn.className = 'text-green-400 text-xs border border-green-800 rounded px-2 py-0.5';
+      setTimeout(resetBtn, 6000);
     } else {
       btn.textContent = 'Failed ✗';
-      btn.className = btn.className.replace('text-gray-500', 'text-red-400').replace('hover:text-blue-400', '');
-      alert('Email failed: ' + (data.error || 'Unknown error'));
+      btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
+      const msg = data.error || 'Unknown error';
+      const hint = msg.includes('authentication') || msg.includes('535')
+        ? '\n\nNote: GMAIL_APP_PASSWORD must be a Google App Password (16 chars), NOT your regular Gmail password. Generate one at: Google Account → Security → 2-Step Verification → App passwords.'
+        : '';
+      alert('Email failed: ' + msg + hint);
+      setTimeout(resetBtn, 6000);
     }
   } catch (e) {
-    btn.textContent = 'Error';
-    btn.className = btn.className.replace('text-gray-500', 'text-red-400').replace('hover:text-blue-400', '');
+    clearTimeout(timeoutId);
+    btn.textContent = e.name === 'AbortError' ? 'Timed out' : 'Error';
+    btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
+    if (e.name === 'AbortError') {
+      alert('Email request timed out after 35 seconds.\n\nMost likely cause: GMAIL_APP_PASSWORD is wrong or not set.\n\nGo to Railway Variables and verify:\n- GMAIL_USER = your Gmail address\n- GMAIL_APP_PASSWORD = 16-character App Password (NOT your Gmail login password)\n- NOTIFY_EMAIL = where to send reports\n\nGenerate an App Password: Google Account → Security → 2-Step Verification → App passwords');
+    }
+    setTimeout(resetBtn, 8000);
   }
-  setTimeout(() => {
-    btn.textContent = 'Test Email';
-    btn.disabled = false;
-    btn.className = 'text-gray-500 hover:text-blue-400 text-xs border border-gray-700 hover:border-blue-600 rounded px-2 py-0.5 transition-colors';
-  }, 5000);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

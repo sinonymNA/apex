@@ -1,10 +1,13 @@
 """
-worker/email_report.py — Daily email report for Apex Trading System.
+worker/email_report.py — Email reports for Apex Trading System.
+
+Three emails per trading day:
+  9:25 AM  — Morning brief: regime, breakout level, entry plan
+  12:00 PM — Noon update: morning recap, P&L, near-misses
+  4:05 PM  — EOD summary: full trade log, gates, anomalies
 
 Sends via Gmail SMTP using GMAIL_USER + GMAIL_APP_PASSWORD.
 Graceful degradation: logs a warning and returns if env vars are missing.
-
-Subject: ATS Daily | {date} | P&L: ${pnl} | Day {n}/20
 """
 import os
 import smtplib
@@ -24,53 +27,219 @@ from worker.db import (
     get_today_near_misses,
 )
 
+_SHARED_CSS = """
+  body { font-family: 'Courier New', monospace; background: #0d0d0d; color: #e0e0e0; margin: 0; padding: 20px; }
+  h2 { color: #00e676; border-bottom: 1px solid #333; padding-bottom: 8px; }
+  h3 { color: #82b1ff; margin-top: 20px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  th { background: #1a1a2e; color: #82b1ff; padding: 8px 10px; text-align: left; font-size: 12px; }
+  tr:nth-child(even) { background: #111; }
+  .stat { display: inline-block; background: #1a1a1a; border: 1px solid #333; padding: 8px 16px; margin: 4px; border-radius: 4px; }
+  .stat-val { font-size: 20px; font-weight: bold; }
+  .stat-label { font-size: 11px; color: #888; }
+"""
 
-def send_daily_report(trade_day_n: int = 1):
-    """
-    Compile today's data and send the daily email report.
 
-    Args:
-        trade_day_n: The current day number in the 20-day evaluation period.
-    """
-    gmail_user = os.getenv("GMAIL_USER")
-    gmail_password = os.getenv("GMAIL_APP_PASSWORD")
-    notify_email = os.getenv("NOTIFY_EMAIL", gmail_user)
+def _get_email_creds():
+    """Return (gmail_user, gmail_pass, notify_email) or (None, None, None)."""
+    u = os.getenv("GMAIL_USER")
+    p = os.getenv("GMAIL_APP_PASSWORD")
+    n = os.getenv("NOTIFY_EMAIL", u)
+    if not u or not p:
+        logger.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email")
+        return None, None, None
+    return u, p, n
 
-    if not gmail_user or not gmail_password:
-        logger.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email report")
-        return
 
-    # Gather data
-    summary = get_today_summary()
-    trades = get_recent_trades(n=20)
-    gates = get_gate_status()
-    risk_log = get_risk_log(n=30)
-    anomalies = get_recent_anomalies(n=10)
-    system_status = get_latest_status()
-    near_misses = get_today_near_misses()
-
-    pnl = summary.get("gross_pnl", 0.0) if summary else 0.0
-    today_str = date.today().isoformat()
-
-    subject = f"ATS Daily | {today_str} | P&L: ${pnl:+.0f} | Day {trade_day_n}/20"
-
-    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
-
+def _smtp_send(gmail_user: str, gmail_pass: str, to: str, subject: str, html: str):
+    """Send an HTML email via Gmail SMTP. Logs errors, never raises."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = gmail_user
-    msg["To"] = notify_email
-    msg.attach(MIMEText(html_body, "html"))
-
+    msg["From"]    = gmail_user
+    msg["To"]      = to
+    msg.attach(MIMEText(html, "html"))
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
             server.ehlo()
             server.starttls()
-            server.login(gmail_user, gmail_password)
-            server.sendmail(gmail_user, notify_email, msg.as_string())
-        logger.info(f"Daily report sent to {notify_email} — {subject}")
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, to, msg.as_string())
+        logger.info(f"Email sent → {to} | {subject}")
     except Exception as e:
-        logger.error(f"Failed to send daily email: {e}")
+        logger.error(f"Email failed: {e}")
+
+
+def send_morning_brief(session_day: int, regime: str, spy_price: float,
+                       breakout_level: float, atr: float):
+    """Send 9:25 AM morning briefing email."""
+    u, p, to = _get_email_creds()
+    if not u:
+        return
+
+    today_str = date.today().isoformat()
+    subject   = f"ATS Morning Brief | {today_str} | Day {session_day}/20 | {regime}"
+
+    pct_gap = (breakout_level - spy_price) / spy_price * 100 if spy_price > 0 else 0
+    stop_lvl   = round(breakout_level - atr, 2)
+    target_lvl = round(breakout_level + 2 * atr, 2)
+
+    trading_blocked = regime in ("Range-Bound", "Extreme Volatility")
+
+    regime_color = {
+        "Strong Trend":    "#00c853",
+        "Weak Trend":      "#82b1ff",
+        "Range-Bound":     "#ff6d00",
+        "High Volatility": "#ff6d00",
+        "Extreme Volatility": "#d50000",
+    }.get(regime, "#888")
+
+    regime_note = {
+        "Strong Trend":    "Strong trending conditions — breakout setups have higher probability.",
+        "Weak Trend":      "Moderate conditions — standard breakout rules apply.",
+        "Range-Bound":     "RANGE-BOUND — all entries blocked until regime changes.",
+        "High Volatility": "Elevated volatility — ATR stops will be wider than usual.",
+        "Extreme Volatility": "EXTREME VOLATILITY — all entries blocked until regime changes.",
+    }.get(regime, "Unknown regime — defaulting to standard rules.")
+
+    blocked_banner = (
+        '<div style="background:#2a0000;border:1px solid #d50000;color:#ff6d6d;'
+        'padding:10px 16px;border-radius:4px;margin:12px 0">'
+        '<strong>TRADING BLOCKED</strong> — regime filter will reject all entries. '
+        'Monitor dashboard; entries resume if regime shifts.</div>'
+    ) if trading_blocked else ''
+
+    levels_section = "" if trading_blocked else f"""
+  <h3>IF BREAKOUT FIRES</h3>
+  <div>
+    <div class="stat"><div class="stat-val" style="color:#00e676">${breakout_level:.2f}</div><div class="stat-label">Entry (approx)</div></div>
+    <div class="stat"><div class="stat-val" style="color:#d50000">${stop_lvl:.2f}</div><div class="stat-label">Stop Loss (1× ATR)</div></div>
+    <div class="stat"><div class="stat-val" style="color:#00c853">${target_lvl:.2f}</div><div class="stat-label">Target (2× ATR)</div></div>
+    <div class="stat"><div class="stat-val">${atr:.2f}</div><div class="stat-label">ATR-14</div></div>
+  </div>"""
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>{_SHARED_CSS}</style></head><body>
+  <h2>▲ APEX — Morning Brief</h2>
+  <p style="color:#888">Day <strong style="color:#e0e0e0">{session_day}/20</strong> &nbsp;|&nbsp; {today_str}
+  &nbsp;|&nbsp; Trading window: <strong style="color:#00e676">9:30 AM – 3:30 PM ET</strong></p>
+
+  <h3>TODAY'S REGIME</h3>
+  <div style="background:#1a1a1a;border-left:4px solid {regime_color};padding:10px 16px;border-radius:4px;margin:8px 0">
+    <strong style="color:{regime_color};font-size:16px">{regime}</strong><br>
+    <span style="color:#ccc;font-size:13px">{regime_note}</span>
+  </div>
+  {blocked_banner}
+
+  <h3>KEY LEVELS</h3>
+  <div>
+    <div class="stat"><div class="stat-val">${spy_price:.2f}</div><div class="stat-label">SPY Last Close</div></div>
+    <div class="stat"><div class="stat-val" style="color:#00e676">${breakout_level:.2f}</div><div class="stat-label">Breakout Level (20-bar high)</div></div>
+    <div class="stat"><div class="stat-val" style="color:{'#ff6d00' if pct_gap > 0.5 else '#00c853'}">{pct_gap:+.2f}%</div><div class="stat-label">Gap to Breakout</div></div>
+  </div>
+  {levels_section}
+
+  <h3>ENTRY CONDITIONS CHECKLIST</h3>
+  <ul style="color:#ccc;line-height:2">
+    <li>SPY closes <strong style="color:#00e676">above ${breakout_level:.2f}</strong> on any 5-min bar</li>
+    <li>Volume <strong>≥ 1.5×</strong> the 20-bar average</li>
+    <li>Time between <strong>9:30 AM – 3:30 PM ET</strong></li>
+    <li>Regime is <strong>not</strong> Range-Bound or Extreme Volatility</li>
+  </ul>
+
+  <hr style="border-color:#333;margin-top:20px">
+  <p style="font-size:10px;color:#555">Noon update at 12:00 PM ET · EOD summary at 4:05 PM ET</p>
+</body></html>"""
+
+    _smtp_send(u, p, to, subject, html)
+
+
+def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
+                     regime: str, spy_price: float, in_position: bool,
+                     near_misses_am: list):
+    """Send 12:00 PM midday update email."""
+    u, p, to = _get_email_creds()
+    if not u:
+        return
+
+    today_str  = date.today().isoformat()
+    pnl_color  = "#00c853" if daily_pnl >= 0 else "#d50000"
+    trades_rem = max(0, 3 - trade_count)
+    subject    = f"ATS Noon Update | {today_str} | P&L: ${daily_pnl:+.0f} | {trade_count} trade{'s' if trade_count != 1 else ''}"
+
+    # Morning near-miss narrative
+    nm_count = len(near_misses_am)
+    if nm_count == 0:
+        nm_html = "<p style='color:#888'>No bars evaluated yet this morning — either market was quiet or system just started.</p>"
+    else:
+        pcts    = [abs(r.get("percent_to_breakout") or 999) for r in near_misses_am]
+        vols    = [r.get("volume_ratio") or 0.0 for r in near_misses_am]
+        closest = min(pcts)
+        best_vol = max(vols)
+        if closest < 0.1:
+            narrative = f"Very close! Price came within {closest:.2f}% of the breakout level (best volume: {best_vol:.2f}×)."
+        elif closest < 0.3:
+            narrative = f"Near approach — price reached within {closest:.2f}% of trigger. Best volume ratio: {best_vol:.2f}×."
+        else:
+            narrative = f"No meaningful breakout attempt. Closest approach: {closest:.2f}% away. Volume: {best_vol:.2f}×."
+        nm_html = f"<p style='color:#ccc'>{nm_count} bars evaluated. {narrative}</p>"
+
+    pos_color = "#00e676" if in_position else "#888"
+    pos_text  = "IN POSITION — monitoring stop/target" if in_position else "No open position"
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>{_SHARED_CSS}</style></head><body>
+  <h2>▲ APEX — Noon Update</h2>
+  <p style="color:#888">Day <strong style="color:#e0e0e0">{session_day}/20</strong> &nbsp;|&nbsp; {today_str}
+  &nbsp;|&nbsp; <strong style="color:#ff6d00">3h 30m remaining</strong> in session</p>
+
+  <div>
+    <div class="stat"><div class="stat-val" style="color:{pnl_color}">${daily_pnl:+.0f}</div><div class="stat-label">P&amp;L So Far</div></div>
+    <div class="stat"><div class="stat-val">{trade_count}</div><div class="stat-label">Trades This AM</div></div>
+    <div class="stat"><div class="stat-val">{trades_rem}</div><div class="stat-label">Trades Remaining</div></div>
+    <div class="stat"><div class="stat-val">${spy_price:.2f}</div><div class="stat-label">SPY Now</div></div>
+    <div class="stat"><div class="stat-val" style="color:#82b1ff">{regime}</div><div class="stat-label">Regime</div></div>
+  </div>
+
+  <h3>MORNING SESSION RECAP</h3>
+  {nm_html}
+  <p style="color:{pos_color}"><strong>{pos_text}</strong></p>
+
+  <h3>AFTERNOON OUTLOOK</h3>
+  <p style="color:#ccc">Session closes at <strong>3:30 PM ET</strong>.
+  {"Max trades reached — no more entries today." if trade_count >= 3 else f"{trades_rem} trade slot{'s' if trades_rem != 1 else ''} remaining."}</p>
+
+  <hr style="border-color:#333;margin-top:20px">
+  <p style="font-size:10px;color:#555">EOD summary will be sent at 4:05 PM ET</p>
+</body></html>"""
+
+    _smtp_send(u, p, to, subject, html)
+
+
+def send_daily_report(trade_day_n: int = 1):
+    """
+    Compile today's data and send the EOD email report (4:05 PM ET).
+
+    Args:
+        trade_day_n: The current day number in the 20-day evaluation period.
+    """
+    u, p, to = _get_email_creds()
+    if not u:
+        return
+
+    summary       = get_today_summary()
+    trades        = get_recent_trades(n=20)
+    gates         = get_gate_status()
+    risk_log      = get_risk_log(n=30)
+    anomalies     = get_recent_anomalies(n=10)
+    system_status = get_latest_status()
+    near_misses   = get_today_near_misses()
+
+    pnl       = summary.get("gross_pnl", 0.0) if summary else 0.0
+    today_str = date.today().isoformat()
+    subject   = f"ATS Daily | {today_str} | P&L: ${pnl:+.0f} | Day {trade_day_n}/20"
+
+    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
+    _smtp_send(u, p, to, subject, html_body)
 
 
 def _build_signal_readiness_section(near_misses: list) -> str:
@@ -202,17 +371,7 @@ def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trad
 <html>
 <head>
   <meta charset="UTF-8">
-  <style>
-    body {{ font-family: 'Courier New', monospace; background: #0d0d0d; color: #e0e0e0; margin: 0; padding: 20px; }}
-    h2 {{ color: #00e676; border-bottom: 1px solid #333; padding-bottom: 8px; }}
-    h3 {{ color: #82b1ff; margin-top: 24px; }}
-    table {{ width: 100%; border-collapse: collapse; margin: 8px 0; }}
-    th {{ background: #1a1a2e; color: #82b1ff; padding: 8px 10px; text-align: left; font-size: 12px; }}
-    tr:nth-child(even) {{ background: #111; }}
-    .stat {{ display: inline-block; background: #1a1a1a; border: 1px solid #333; padding: 8px 16px; margin: 4px; border-radius: 4px; }}
-    .stat-val {{ font-size: 20px; font-weight: bold; }}
-    .stat-label {{ font-size: 11px; color: #888; }}
-  </style>
+  <style>{_SHARED_CSS}</style>
 </head>
 <body>
   <h2>APEX TRADING SYSTEM — Daily Report</h2>
