@@ -513,7 +513,7 @@ function renderTrades(trades) {
       <td class="px-4 py-2 ${sideColor}">${side || '—'}</td>
       <td class="px-4 py-2 text-right text-gray-300">${t.entry_price != null ? '$' + Number(t.entry_price).toFixed(2) : '—'}</td>
       <td class="px-4 py-2 text-right text-gray-300">${t.exit_price != null ? '$' + Number(t.exit_price).toFixed(2) : '—'}</td>
-      <td class="px-4 py-2 text-right">${fmt$(t.pnl_dollar ?? t.pnl)}</td>
+      <td class="px-4 py-2 text-right">${fmt$(t.pnl_dollars ?? t.pnl_dollar ?? t.pnl)}</td>
       <td class="px-4 py-2 text-right">${fmtR(t.pnl_r)}</td>
       <td class="px-4 py-2 text-gray-400 hidden md:table-cell">${t.regime || '—'}</td>
       <td class="px-4 py-2 text-gray-500 hidden lg:table-cell max-w-32 truncate">${t.exit_reason || t.reason || '—'}</td>
