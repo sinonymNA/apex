@@ -619,17 +619,17 @@ function marketStatusMsg() {
   const [hStr, mStr] = etStr.split(':');
   const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
   const nowMins = h * 60 + m;
-  const openMins = 10 * 60;      // 10:00 AM
+  const openMins = 9 * 60 + 30;   // 9:30 AM
   const closeMins = 15 * 60 + 30; // 3:30 PM
   const day = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
   const isWeekend = day === 'Sat' || day === 'Sun';
 
-  if (isWeekend) return `Weekend — trading resumes Monday at 10:00 AM ET`;
+  if (isWeekend) return `Weekend — trading resumes Monday at 9:30 AM ET`;
   if (nowMins < openMins) {
     const diff = openMins - nowMins;
-    return `Pre-market — trading window opens in ${Math.floor(diff/60)}h ${diff%60}m (10:00 AM ET)`;
+    return `Pre-market — trading window opens in ${Math.floor(diff/60)}h ${diff%60}m (9:30 AM ET)`;
   }
-  if (nowMins >= closeMins) return `After hours — trading closed for today. Next session opens tomorrow at 10:00 AM ET`;
+  if (nowMins >= closeMins) return `After hours — trading closed for today. Next session opens tomorrow at 9:30 AM ET`;
   return `Market OPEN — evaluating SPY bars every 5 minutes`;
 }
 
@@ -642,7 +642,7 @@ function renderLastSignal(data) {
   if (!data || data.message) {
     // No bar data yet — show market status instead
     summary.textContent = marketStatusMsg();
-    detail.innerHTML = '<div class="text-gray-700 col-span-2">Bar evaluations appear here once the market opens at 10:00 AM ET. Refreshing every 10s.</div>';
+    detail.innerHTML = '<div class="text-gray-700 col-span-2">Bar evaluations appear here once the market opens at 9:30 AM ET. Refreshing every 10s.</div>';
     if (timeEl) timeEl.textContent = '';
     return;
   }

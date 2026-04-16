@@ -99,9 +99,14 @@ def _fetch_bars():
         if df.empty:
             logger.warning("yfinance returned empty DataFrame")
             return None
-        # Handle multi-level columns from yfinance 0.2.x
+        # Handle multi-level columns from yfinance (field/ticker level order varies by version)
         if hasattr(df.columns, "levels"):
-            df.columns = df.columns.get_level_values(0)
+            # Find the level that contains OHLCV field names (not ticker names)
+            for _lvl in range(df.columns.nlevels):
+                _candidate = df.columns.get_level_values(_lvl)
+                if "Close" in _candidate:
+                    df.columns = _candidate
+                    break
         return df
     except Exception as e:
         logger.error(f"Failed to fetch bars: {e}")
