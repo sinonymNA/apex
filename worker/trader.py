@@ -331,7 +331,7 @@ def five_min_bar_job():
         if regime in ("Range-Bound", "Extreme Volatility"):
             logger.debug(f"Regime {regime} — no entry")
             db.log_risk_check("regime", "BLOCKED", f"Regime is {regime}")
-            if _nm and _nm["is_near_miss"]:
+            if _nm:  # log every bar so Last Signal Check always has data
                 _log_near_miss_safe(_nm, regime, "regime_blocked", _state["trade_count"])
             return
     except Exception as e:
@@ -342,7 +342,7 @@ def five_min_bar_job():
     # ── Signal generation ─────────────────────────────────────────────────────
     signal = _strategy.generate_signals(df, now_et, _state["trade_count"])
     if signal is None:
-        if _nm and _nm["is_near_miss"]:
+        if _nm:  # log every bar so Last Signal Check always has data
             t = now_et.time()
             if not (time(10, 0) <= t < time(15, 30)):
                 _reason = "outside_time_window"
@@ -367,7 +367,7 @@ def five_min_bar_job():
 
     if not risk_result["approved"]:
         logger.debug(f"Risk check blocked: {risk_result['reason']}")
-        if _nm and _nm["is_near_miss"]:
+        if _nm:  # log every bar
             _log_near_miss_safe(_nm, _state["regime"], "risk_blocked", _state["trade_count"])
         return
 

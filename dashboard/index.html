@@ -74,7 +74,7 @@
       <span id="hdr-updated" class="text-gray-500 text-xs hidden sm:inline"></span>
       <div id="countdown-wrap" class="text-gray-600 text-xs hidden sm:flex items-center gap-1">
         <span>refresh in</span>
-        <span id="countdown" class="text-gray-400 w-4 text-right">30</span>
+        <span id="countdown" class="text-gray-400 w-4 text-right">10</span>
         <span>s</span>
       </div>
       <button
@@ -263,7 +263,8 @@
 let _secret = '';
 let _refreshTimer = null;
 let _countdownTimer = null;
-let _countdownVal = 30;
+let _countdownVal = 10;
+const REFRESH_INTERVAL_MS = 10000;
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function login() {
@@ -296,13 +297,13 @@ function showDashboard() {
 function startAutoRefresh() {
   clearInterval(_refreshTimer);
   clearInterval(_countdownTimer);
-  _countdownVal = 30;
+  _countdownVal = REFRESH_INTERVAL_MS / 1000;
   document.getElementById('countdown').textContent = _countdownVal;
 
   _refreshTimer = setInterval(() => {
     doRefresh();
-    _countdownVal = 30;
-  }, 30000);
+    _countdownVal = REFRESH_INTERVAL_MS / 1000;
+  }, REFRESH_INTERVAL_MS);
 
   _countdownTimer = setInterval(() => {
     _countdownVal = Math.max(0, _countdownVal - 1);
@@ -311,7 +312,7 @@ function startAutoRefresh() {
 }
 
 async function doRefresh() {
-  _countdownVal = 30;
+  _countdownVal = REFRESH_INTERVAL_MS / 1000;
   document.getElementById('countdown').textContent = _countdownVal;
   const headers = { 'X-Dashboard-Secret': _secret };
 
@@ -604,6 +605,28 @@ function renderSysCheck(data) {
   }).join('');
 }
 
+// ── Market hours helpers ──────────────────────────────────────────────────────
+function marketStatusMsg() {
+  const now = new Date();
+  // Convert to ET
+  const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  const [hStr, mStr] = etStr.split(':');
+  const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
+  const nowMins = h * 60 + m;
+  const openMins = 10 * 60;      // 10:00 AM
+  const closeMins = 15 * 60 + 30; // 3:30 PM
+  const day = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+  const isWeekend = day === 'Sat' || day === 'Sun';
+
+  if (isWeekend) return `Weekend — trading resumes Monday at 10:00 AM ET`;
+  if (nowMins < openMins) {
+    const diff = openMins - nowMins;
+    return `Pre-market — trading window opens in ${Math.floor(diff/60)}h ${diff%60}m (10:00 AM ET)`;
+  }
+  if (nowMins >= closeMins) return `After hours — trading closed for today. Next session opens tomorrow at 10:00 AM ET`;
+  return `Market OPEN — evaluating SPY bars every 5 minutes`;
+}
+
 // ── Last Signal + Near Misses ─────────────────────────────────────────────────
 function renderLastSignal(data) {
   const summary = document.getElementById('last-signal-summary');
@@ -611,8 +634,9 @@ function renderLastSignal(data) {
   const timeEl  = document.getElementById('last-signal-time');
 
   if (!data || data.message) {
-    summary.textContent = (data && data.human_summary) || 'No signal evaluation data yet.';
-    detail.innerHTML = '';
+    // No bar data yet — show market status instead
+    summary.textContent = marketStatusMsg();
+    detail.innerHTML = '<div class="text-gray-700 col-span-2">Bar evaluations appear here once the market opens at 10:00 AM ET. Refreshing every 10s.</div>';
     if (timeEl) timeEl.textContent = '';
     return;
   }
