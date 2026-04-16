@@ -273,40 +273,60 @@ async def get_near_misses(limit: int = Query(default=20, ge=1, le=100)):
 
 @app.post("/api/debug/send-test-email", dependencies=[Depends(verify_auth)])
 async def send_test_email():
-    """Send a test email immediately to verify Gmail config is working."""
-    import os, smtplib
+    """Send a test email using Resend (preferred) or SMTP fallback."""
+    notify = os.getenv("NOTIFY_EMAIL") or os.getenv("GMAIL_USER", "")
+    if not notify:
+        return {"ok": False, "error": "NOTIFY_EMAIL not set in Railway Variables"}
+
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    html = """<html><body style="font-family:monospace;background:#0d0d0d;color:#e0e0e0;padding:20px">
+<h2 style="color:#00e676">&#9650; APEX &mdash; Email Test</h2>
+<p>Email is working. Morning brief, noon update, and EOD summary will arrive automatically.</p>
+<p style="color:#888;font-size:12px">Sent via Resend API</p>
+</body></html>"""
+
+    if resend_key:
+        try:
+            import requests as _req
+            from_addr = os.getenv("RESEND_FROM", "Apex Trading <onboarding@resend.dev>")
+            resp = _req.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+                json={"from": from_addr, "to": [notify], "subject": "Apex Trading System — Test Email", "html": html},
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Test email sent via Resend to {notify}")
+                return {"ok": True, "sent_to": notify, "method": "resend"}
+            else:
+                err = resp.json().get("message", resp.text[:100]) if resp.text else str(resp.status_code)
+                logger.error(f"Resend test email failed: {err}")
+                return {"ok": False, "error": f"Resend error: {err}"}
+        except Exception as e:
+            logger.error(f"Resend test email exception: {e}")
+            return {"ok": False, "error": str(e)}
+
+    # SMTP fallback (blocked on Railway, works locally)
+    import smtplib
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
-
     gmail_user = os.getenv("GMAIL_USER", "")
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
-    notify     = os.getenv("NOTIFY_EMAIL", gmail_user)
-
     if not gmail_user or not gmail_pass:
-        return {"ok": False, "error": "GMAIL_USER or GMAIL_APP_PASSWORD not set in Railway Variables"}
-
+        return {"ok": False, "error": "Set RESEND_API_KEY (recommended) or GMAIL_USER + GMAIL_APP_PASSWORD. Railway blocks SMTP — Resend is required on Railway."}
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = "Apex Trading System — Test Email ✓"
-        msg["From"]    = gmail_user
-        msg["To"]      = notify
-        body = """<html><body style="font-family:monospace;background:#0d0d0d;color:#e0e0e0;padding:20px">
-<h2 style="color:#00e676">▲ APEX — Email Test</h2>
-<p>If you received this, your email configuration is working correctly.</p>
-<p style="color:#888">Daily reports will be sent at 4:05 PM ET each trading day.</p>
-</body></html>"""
-        msg.attach(MIMEText(body, "html"))
-
+        msg["Subject"] = "Apex Trading System — Test Email"
+        msg["From"] = gmail_user
+        msg["To"] = notify
+        msg.attach(MIMEText(html, "html"))
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
-            server.ehlo()
-            server.starttls()
+            server.ehlo(); server.starttls()
             server.login(gmail_user, gmail_pass)
             server.sendmail(gmail_user, notify, msg.as_string())
-
-        logger.info(f"Test email sent to {notify}")
-        return {"ok": True, "sent_to": notify}
+        return {"ok": True, "sent_to": notify, "method": "smtp"}
     except Exception as e:
-        logger.error(f"Test email failed: {e}")
+        logger.error(f"SMTP test email failed: {e}")
         return {"ok": False, "error": str(e)}
 
 

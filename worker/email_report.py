@@ -40,19 +40,59 @@ _SHARED_CSS = """
 """
 
 
-def _get_email_creds():
-    """Return (gmail_user, gmail_pass, notify_email) or (None, None, None)."""
-    u = os.getenv("GMAIL_USER")
-    p = os.getenv("GMAIL_APP_PASSWORD")
-    n = os.getenv("NOTIFY_EMAIL", u)
-    if not u or not p:
-        logger.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email")
-        return None, None, None
-    return u, p, n
+def _get_notify_email():
+    """Return the destination email address, or None if unconfigured."""
+    to = os.getenv("NOTIFY_EMAIL") or os.getenv("GMAIL_USER")
+    has_resend = bool(os.getenv("RESEND_API_KEY"))
+    has_smtp   = bool(os.getenv("GMAIL_USER") and os.getenv("GMAIL_APP_PASSWORD"))
+    if not to:
+        logger.warning("NOTIFY_EMAIL not set — email reports disabled")
+        return None
+    if not has_resend and not has_smtp:
+        logger.warning("No email method configured — set RESEND_API_KEY (recommended) or GMAIL_USER+GMAIL_APP_PASSWORD")
+        return None
+    return to
 
 
-def _smtp_send(gmail_user: str, gmail_pass: str, to: str, subject: str, html: str):
-    """Send an HTML email via Gmail SMTP. Logs errors, never raises."""
+def _smtp_send(to: str, subject: str, html: str):
+    """
+    Send HTML email. Tries Resend HTTP API first (Railway-compatible),
+    falls back to Gmail SMTP (works locally, blocked on Railway).
+    """
+    resend_key = os.getenv("RESEND_API_KEY", "")
+    if resend_key:
+        _resend_send(resend_key, to, subject, html)
+        return
+    # SMTP fallback
+    gmail_user = os.getenv("GMAIL_USER", "")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+    if not gmail_user or not gmail_pass:
+        logger.error("No email method available — set RESEND_API_KEY or GMAIL credentials")
+        return
+    _smtp_direct(gmail_user, gmail_pass, to, subject, html)
+
+
+def _resend_send(api_key: str, to: str, subject: str, html: str):
+    """Send via Resend HTTP API (port 443 — not blocked by Railway)."""
+    import requests
+    from_addr = os.getenv("RESEND_FROM", "Apex Trading <onboarding@resend.dev>")
+    try:
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"from": from_addr, "to": [to], "subject": subject, "html": html},
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            logger.info(f"Email sent via Resend → {to} | {subject}")
+        else:
+            logger.error(f"Resend API error {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"Resend send failed: {e}")
+
+
+def _smtp_direct(gmail_user: str, gmail_pass: str, to: str, subject: str, html: str):
+    """Send via Gmail SMTP. Works locally; Railway blocks port 587."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = gmail_user
@@ -64,16 +104,16 @@ def _smtp_send(gmail_user: str, gmail_pass: str, to: str, subject: str, html: st
             server.starttls()
             server.login(gmail_user, gmail_pass)
             server.sendmail(gmail_user, to, msg.as_string())
-        logger.info(f"Email sent → {to} | {subject}")
+        logger.info(f"Email sent via SMTP → {to} | {subject}")
     except Exception as e:
-        logger.error(f"Email failed: {e}")
+        logger.error(f"SMTP send failed: {e}")
 
 
 def send_morning_brief(session_day: int, regime: str, spy_price: float,
                        breakout_level: float, atr: float):
     """Send 9:25 AM morning briefing email."""
-    u, p, to = _get_email_creds()
-    if not u:
+    to = _get_notify_email()
+    if not to:
         return
 
     today_str = date.today().isoformat()
@@ -150,15 +190,15 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
   <p style="font-size:10px;color:#555">Noon update at 12:00 PM ET · EOD summary at 4:05 PM ET</p>
 </body></html>"""
 
-    _smtp_send(u, p, to, subject, html)
+    _smtp_send(to, subject, html)
 
 
 def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
                      regime: str, spy_price: float, in_position: bool,
                      near_misses_am: list):
     """Send 12:00 PM midday update email."""
-    u, p, to = _get_email_creds()
-    if not u:
+    to = _get_notify_email()
+    if not to:
         return
 
     today_str  = date.today().isoformat()
@@ -212,7 +252,7 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
   <p style="font-size:10px;color:#555">EOD summary will be sent at 4:05 PM ET</p>
 </body></html>"""
 
-    _smtp_send(u, p, to, subject, html)
+    _smtp_send(to, subject, html)
 
 
 def send_daily_report(trade_day_n: int = 1):
@@ -222,8 +262,8 @@ def send_daily_report(trade_day_n: int = 1):
     Args:
         trade_day_n: The current day number in the 20-day evaluation period.
     """
-    u, p, to = _get_email_creds()
-    if not u:
+    to = _get_notify_email()
+    if not to:
         return
 
     summary       = get_today_summary()
@@ -239,7 +279,7 @@ def send_daily_report(trade_day_n: int = 1):
     subject   = f"ATS Daily | {today_str} | P&L: ${pnl:+.0f} | Day {trade_day_n}/20"
 
     html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
-    _smtp_send(u, p, to, subject, html_body)
+    _smtp_send(to, subject, html_body)
 
 
 def _build_signal_readiness_section(near_misses: list) -> str:
