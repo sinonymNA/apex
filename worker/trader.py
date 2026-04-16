@@ -292,6 +292,11 @@ def five_min_bar_job():
     df = _fetch_bars()
     if df is None or len(df) < 30:
         logger.warning("Insufficient data — skipping bar")
+        _log_near_miss_safe(
+            {"close": None, "breakout_level": None, "percent_to_breakout": None,
+             "volume": None, "required_volume": None, "volume_ratio": None},
+            _state["regime"], "data_unavailable", _state["trade_count"],
+        )
         return
 
     # ── Compute indicators ────────────────────────────────────────────────────
@@ -299,10 +304,19 @@ def five_min_bar_job():
         df = _strategy.compute_indicators(df)
     except Exception as e:
         logger.error(f"compute_indicators error: {e}")
+        _log_near_miss_safe(
+            {"close": None, "breakout_level": None, "percent_to_breakout": None,
+             "volume": None, "required_volume": None, "volume_ratio": None},
+            _state["regime"], "indicator_error", _state["trade_count"],
+        )
         return
 
     # ── Evaluate near-miss proximity (non-blocking, used for visibility) ─────
-    _nm = _strategy.evaluate_signal_state(df)
+    try:
+        _nm = _strategy.evaluate_signal_state(df)
+    except Exception as e:
+        logger.error(f"evaluate_signal_state error: {e}")
+        _nm = None
 
     # ── Monitor open position ─────────────────────────────────────────────────
     if _state["current_position"] is not None:

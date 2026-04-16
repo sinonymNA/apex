@@ -330,7 +330,74 @@ async def send_test_email():
         return {"ok": False, "error": str(e)}
 
 
-# ── Dashboard catch-all (must be LAST so /api/* routes take precedence) ────────
+@app.get("/api/debug/pipeline-test", dependencies=[Depends(verify_auth)])
+async def pipeline_test():
+    """Run the full bar pipeline end-to-end and return verbose diagnostics."""
+    import datetime as _dt
+    import yfinance as yf
+    from worker.strategy import MomentumBreakout
+    from worker.db import log_near_miss, get_last_near_miss
+
+    out = {}
+
+    # Step 1: yfinance fetch
+    try:
+        df = yf.download("SPY", period="2d", interval="5m", auto_adjust=True, progress=False)
+        raw_cols = list(df.columns)
+        out["step1_fetch"] = {"ok": True, "rows": len(df), "columns_raw": str(raw_cols)}
+
+        if hasattr(df.columns, "levels"):
+            for _lvl in range(df.columns.nlevels):
+                _cand = df.columns.get_level_values(_lvl)
+                if "Close" in _cand:
+                    df.columns = _cand
+                    break
+            out["step1_fetch"]["columns_after_fix"] = list(df.columns)
+        out["step1_fetch"]["last_close"] = float(df["Close"].iloc[-1]) if "Close" in df.columns else None
+    except Exception as e:
+        return {"step1_fetch": {"ok": False, "error": str(e)}}
+
+    # Step 2: compute_indicators
+    try:
+        strat = MomentumBreakout()
+        df_ind = strat.compute_indicators(df)
+        valid = df_ind.dropna(subset=["high_20", "volume_avg", "atr14"])
+        out["step2_indicators"] = {
+            "ok": True,
+            "total_rows": len(df_ind),
+            "valid_rows": len(valid),
+            "last_high20": float(valid["high_20"].iloc[-1]) if not valid.empty else None,
+            "last_atr14": float(valid["atr14"].iloc[-1]) if not valid.empty else None,
+        }
+    except Exception as e:
+        return {**out, "step2_indicators": {"ok": False, "error": str(e)}}
+
+    # Step 3: evaluate_signal_state
+    try:
+        nm = strat.evaluate_signal_state(df_ind)
+        out["step3_signal_state"] = nm if nm else {"is_none": True}
+    except Exception as e:
+        return {**out, "step3_signal_state": {"ok": False, "error": str(e)}}
+
+    # Step 4: DB write test
+    try:
+        log_near_miss({
+            "timestamp": _dt.datetime.now(_dt.timezone.utc),
+            "symbol": "SPY",
+            "blocked_reason": "pipeline_test",
+            "regime": "test",
+            "trades_today": 0,
+            **(nm or {}),
+        })
+        last = get_last_near_miss()
+        out["step4_db_write"] = {"ok": True, "last_reason": last.get("blocked_reason")}
+    except Exception as e:
+        out["step4_db_write"] = {"ok": False, "error": str(e)}
+
+    return out
+
+
+
 @app.get("/", include_in_schema=False)
 async def serve_root():
     if _DASHBOARD_HTML.exists():
