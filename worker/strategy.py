@@ -23,12 +23,12 @@ from worker.risk import MAX_TRADES_PER_DAY
 
 class MomentumBreakout:
     """
-    20-bar momentum breakout strategy with ATR-based stops and targets.
+    Momentum breakout strategy with ATR-based stops and targets.
 
     Entry conditions (ALL must be true):
-      - Close > 20-bar rolling high (breakout)
-      - Volume >= 1.5x 20-bar average volume
-      - Time is between 10:00 AM and 3:30 PM ET
+      - Close > 10-bar rolling high (breakout above 50-min high)
+      - Volume >= 1.2x 10-bar average volume
+      - Time is between 9:30 AM and 3:30 PM ET
       - Trades today < MAX_TRADES_PER_DAY
 
     Risk levels:
@@ -37,8 +37,8 @@ class MomentumBreakout:
       - Max hold: 4 hours (240 minutes)
     """
 
-    LOOKBACK = 20
-    VOLUME_MULTIPLIER = 1.5
+    LOOKBACK = 10
+    VOLUME_MULTIPLIER = 1.2
     STOP_ATR = 1.0
     TARGET_ATR = 2.0
     MAX_HOLD_MINUTES = 240

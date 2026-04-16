@@ -111,12 +111,12 @@ class TestComputeIndicators:
             strat.compute_indicators(bad_df)
 
     def test_high_20_is_shifted(self):
-        """high_20 should be NaN for the first 21 rows (20 lookback + 1 shift)."""
+        """high_20 should be NaN for the first LOOKBACK rows (10 lookback + 1 shift = 10 NaN rows)."""
         strat = MomentumBreakout()
         df = make_ohlcv(n=60)
         result = strat.compute_indicators(df)
-        # After shift(1), rows 0..19 (20 rows) should be NaN
-        assert result["high_20"].iloc[:20].isna().all()
+        # After shift(1) with LOOKBACK=10: rows 0..9 (10 rows) should be NaN
+        assert result["high_20"].iloc[:strat.LOOKBACK].isna().all()
 
     def test_atr14_is_positive_after_warmup(self):
         strat = MomentumBreakout()
