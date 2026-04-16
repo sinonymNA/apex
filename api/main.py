@@ -22,7 +22,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from loguru import logger
 
 # load_dotenv BEFORE any internal imports that create DB engines at import time
@@ -328,6 +328,47 @@ async def send_test_email():
     except Exception as e:
         logger.error(f"SMTP test email failed: {e}")
         return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/export/trades.csv", dependencies=[Depends(verify_auth)])
+async def export_trades_csv():
+    """Download all trades as CSV."""
+    import csv, io
+    trades = get_recent_trades(n=10_000)
+    cols = ["id", "entry_time", "exit_time", "symbol", "direction",
+            "entry_price", "exit_price", "stop_price", "target_price",
+            "shares", "pnl_dollars", "pnl_r", "atr_at_entry",
+            "volume_ratio", "exit_reason", "regime"]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    if trades:
+        w.writerows(trades)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="apex_trades.csv"'},
+    )
+
+
+@app.get("/api/export/near-misses.csv", dependencies=[Depends(verify_auth)])
+async def export_near_misses_csv():
+    """Download all near-miss signal records as CSV."""
+    import csv, io
+    rows = get_recent_near_misses(n=10_000)
+    cols = ["id", "timestamp", "symbol", "close", "breakout_level",
+            "percent_to_breakout", "volume", "required_volume",
+            "volume_ratio", "regime", "blocked_reason", "trades_today"]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    if rows:
+        w.writerows(rows)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="apex_near_misses.csv"'},
+    )
 
 
 @app.get("/api/debug/pipeline-test", dependencies=[Depends(verify_auth)])
