@@ -23,6 +23,7 @@ from worker.db import (
     get_latest_status,
     get_today_near_misses,
 )
+from worker.news import fetch_news, analyze_with_claude
 
 _SHARED_CSS = """
   body { font-family: 'Courier New', monospace; background: #0d0d0d; color: #e0e0e0; margin: 0; padding: 20px; }
@@ -115,6 +116,9 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
 
     gates      = get_gate_status()
     gate_html  = _build_gate_compact(gates, session_day)
+    headlines  = fetch_news(max_items=5)
+    analysis   = analyze_with_claude(headlines)
+    news_html  = _build_news_section(headlines, analysis)
     today_str  = date.today().isoformat()
     month_day  = date.today().strftime("%b %-d")
     subject    = f"Sable Stocks | Morning Brief | {month_day} | Day {session_day}/20"
@@ -178,6 +182,8 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
   </div>
   {levels_section}
 
+  {news_html}
+
   <h3>GATE PROGRESS</h3>
   {gate_html}
 
@@ -206,6 +212,9 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
 
     gates      = get_gate_status()
     gate_html  = _build_gate_compact(gates, session_day)
+    headlines  = fetch_news(max_items=5)
+    analysis   = analyze_with_claude(headlines)
+    news_html  = _build_news_section(headlines, analysis)
     today_str  = date.today().isoformat()
     month_day  = date.today().strftime("%b %-d")
     pnl_color  = "#00c853" if daily_pnl >= 0 else "#d50000"
@@ -250,6 +259,8 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
   {nm_html}
   <p style="color:{pos_color}"><strong>{pos_text}</strong></p>
 
+  {news_html}
+
   <h3>GATE PROGRESS</h3>
   {gate_html}
 
@@ -282,14 +293,44 @@ def send_daily_report(trade_day_n: int = 1):
     anomalies     = get_recent_anomalies(n=10)
     system_status = get_latest_status()
     near_misses   = get_today_near_misses()
+    headlines     = fetch_news(max_items=5)
+    analysis      = analyze_with_claude(headlines)
 
     pnl       = summary.get("gross_pnl", 0.0) if summary else 0.0
     today_str = date.today().isoformat()
     month_day = date.today().strftime("%b %-d")
     subject   = f"Sable Stocks | End of Day | {month_day} | P&L: ${pnl:+.0f}"
 
-    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
+    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses, headlines, analysis)
     _smtp_send(to, subject, html_body)
+
+
+def _build_news_section(headlines: list, analysis: str) -> str:
+    """Build the SABLE NEWS HTML block for all email types."""
+    if not headlines and not analysis:
+        return '<h3>SABLE NEWS</h3><p style="color:#888;font-size:12px">No news data available.</p>'
+
+    analysis_html = (
+        f'<p style="color:#ccc;font-size:13px;margin:0 0 10px 0">{analysis}</p>'
+        if analysis else ""
+    )
+
+    items_html = ""
+    for h in headlines:
+        url   = h.get("url", "#")
+        title = h.get("title", "")
+        src   = h.get("source", "")
+        link  = f'<a href="{url}" style="color:#82b1ff;text-decoration:none">{title}</a>' if url and url != "#" else title
+        items_html += f'<li style="margin-bottom:4px">{link} <span style="color:#555">({src})</span></li>'
+
+    return f"""
+    <h3>SABLE NEWS</h3>
+    <div style="background:#111;border:1px solid #2a2a2a;padding:12px 14px;border-radius:4px;margin:8px 0">
+      {analysis_html}
+      <ul style="color:#888;font-size:12px;margin:0;padding-left:16px;line-height:1.7">
+        {items_html}
+      </ul>
+    </div>"""
 
 
 def _build_gate_compact(gates: dict, session_day: int) -> str:
@@ -365,7 +406,7 @@ def _build_signal_readiness_section(near_misses: list) -> str:
     <p style="color:#ccc;margin-top:8px">{narrative}</p>"""
 
 
-def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses=None) -> str:
+def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses=None, headlines=None, analysis="") -> str:
     today_str = date.today().isoformat()
     pnl = summary.get("gross_pnl", 0.0) if summary else 0.0
     pnl_color = "#00c853" if pnl >= 0 else "#d50000"
@@ -477,6 +518,8 @@ def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trad
       <div class="stat-label">Avg R</div>
     </div>
   </div>
+
+  {_build_news_section(headlines or [], analysis or "")}
 
   <h3>GATE STATUS</h3>
   <table>
