@@ -21,36 +21,31 @@ from loguru import logger
 load_dotenv()
 
 # ── Engine setup ──────────────────────────────────────────────────────────────
-_raw_url = os.getenv("DATABASE_URL", "")
-
-# Normalize Railway's postgres:// → postgresql:// (SQLAlchemy requirement)
-if _raw_url.startswith("postgres://"):
-    _raw_url = _raw_url.replace("postgres://", "postgresql://", 1)
-
-_is_postgres = _raw_url.startswith("postgresql")
-_is_sqlite   = not _is_postgres
-
-if _is_sqlite:
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if not DATABASE_URL:
     _log_dir = Path(__file__).parent.parent / "logs"
     _log_dir.mkdir(exist_ok=True)
-    _DATABASE_URL = _raw_url or f"sqlite:///{_log_dir}/trades.db"
-    _connect_args = {"check_same_thread": False}
-    engine = create_engine(_DATABASE_URL, connect_args=_connect_args, echo=False)
+    DATABASE_URL = f"sqlite:///{_log_dir}/trades.db"
+
+if "postgresql" in DATABASE_URL:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        connect_args={"sslmode": "require"},
+    )
+    logger.info("PostgreSQL engine created with SSL + pool_pre_ping")
+else:
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+    )
     logger.warning(
         "Running on SQLite — data will be lost on Railway redeploy. "
         "Add Railway PostgreSQL plugin for persistence."
     )
-else:
-    _DATABASE_URL = _raw_url
-    # SSL required for Railway PostgreSQL; pooling prevents stale connections
-    engine = create_engine(
-        _DATABASE_URL,
-        connect_args={"sslmode": "require"},
-        pool_pre_ping=True,
-        pool_recycle=300,
-        echo=False,
-    )
-    logger.info("PostgreSQL engine created with SSL + pool_pre_ping")
 
 
 # ── ORM Base ──────────────────────────────────────────────────────────────────
