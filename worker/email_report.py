@@ -113,6 +113,8 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
     if not to:
         return
 
+    gates      = get_gate_status()
+    gate_html  = _build_gate_compact(gates, session_day)
     today_str  = date.today().isoformat()
     month_day  = date.today().strftime("%b %-d")
     subject    = f"Sable Stocks | Morning Brief | {month_day} | Day {session_day}/20"
@@ -176,6 +178,9 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
   </div>
   {levels_section}
 
+  <h3>GATE PROGRESS</h3>
+  {gate_html}
+
   <h3>ENTRY CONDITIONS CHECKLIST</h3>
   <ul style="color:#ccc;line-height:2">
     <li>SPY closes <strong style="color:#00e676">above ${breakout_level:.2f}</strong> on any 5-min bar</li>
@@ -199,6 +204,8 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
     if not to:
         return
 
+    gates      = get_gate_status()
+    gate_html  = _build_gate_compact(gates, session_day)
     today_str  = date.today().isoformat()
     month_day  = date.today().strftime("%b %-d")
     pnl_color  = "#00c853" if daily_pnl >= 0 else "#d50000"
@@ -243,6 +250,9 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
   {nm_html}
   <p style="color:{pos_color}"><strong>{pos_text}</strong></p>
 
+  <h3>GATE PROGRESS</h3>
+  {gate_html}
+
   <h3>AFTERNOON OUTLOOK</h3>
   <p style="color:#ccc">Session closes at <strong>3:30 PM ET</strong>.
   {"Max trades reached — no more entries today." if trade_count >= 3 else f"{trades_rem} trade slot{'s' if trades_rem != 1 else ''} remaining."}</p>
@@ -280,6 +290,38 @@ def send_daily_report(trade_day_n: int = 1):
 
     html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
     _smtp_send(to, subject, html_body)
+
+
+def _build_gate_compact(gates: dict, session_day: int) -> str:
+    """Compact gate status block for morning brief and noon update emails."""
+    if not gates:
+        return f'<p style="color:#888;font-size:12px">No gate data yet — Day {session_day}/20</p>'
+    gate_defs = [
+        ("G1 Return",    gates.get("gate1_return"),     lambda v: v is not None and v > 0),
+        ("G2 Violations",gates.get("gate2_violations"), lambda v: v is not None and v < 3),
+        ("G3 Drawdown",  gates.get("gate3_drawdown"),   lambda v: v is not None and v > -2800),
+        ("G4 Win Rate",  gates.get("gate4_winrate"),    lambda v: v is not None and v > 0.38),
+        ("G5 Slippage",  gates.get("gate5_slippage"),   lambda v: v is not None and v < 0.05),
+    ]
+    items = ""
+    passed_count = 0
+    for label, value, check_fn in gate_defs:
+        passed = check_fn(value)
+        if passed:
+            passed_count += 1
+        color = "#00c853" if passed else "#555"
+        mark  = "✓" if passed else "·"
+        val_str = f"{value:.2f}" if isinstance(value, float) else "—"
+        items += f'<span style="color:{color};margin-right:14px">{mark} {label}: {val_str}</span>'
+    overall_color = "#00c853" if passed_count == 5 else ("#ff6d00" if passed_count >= 3 else "#888")
+    return f"""
+    <div style="background:#111;border:1px solid #333;padding:10px 14px;border-radius:4px;margin:8px 0">
+      <div style="font-size:11px;color:#555;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">
+        Gate Progress — Day {session_day}/20 &nbsp;|&nbsp;
+        <strong style="color:{overall_color}">{passed_count}/5 passing</strong>
+      </div>
+      <div style="font-size:12px;line-height:1.8">{items}</div>
+    </div>"""
 
 
 def _build_signal_readiness_section(near_misses: list) -> str:
