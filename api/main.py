@@ -1,5 +1,5 @@
 """
-api/main.py — Unified FastAPI service for Apex Trading System.
+api/main.py — Unified FastAPI service for Sable Stocks.
 
 Single Railway service: serves dashboard, API routes, and runs the trading
 worker in a background daemon thread. Zero extra configuration required.
@@ -47,7 +47,7 @@ _DASHBOARD_HTML = Path(__file__).parent.parent / "dashboard" / "index.html"
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Apex Trading System",
+    title="Sable Stocks",
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url=None,
@@ -111,7 +111,7 @@ async def startup_event():
     else:
         logger.warning("dashboard/index.html not found — GET / will return 404")
 
-    logger.info("Apex Trading System API ready")
+    logger.info("Sable Stocks API ready")
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -288,11 +288,11 @@ async def send_test_email():
     if resend_key:
         try:
             import requests as _req
-            from_addr = os.getenv("RESEND_FROM", "Apex Trading <onboarding@resend.dev>")
+            from_addr = os.getenv("RESEND_FROM", "Sable Stocks <onboarding@resend.dev>")
             resp = _req.post(
                 "https://api.resend.com/emails",
                 headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
-                json={"from": from_addr, "to": [notify], "subject": "Apex Trading System — Test Email", "html": html},
+                json={"from": from_addr, "to": [notify], "subject": "Sable Stocks — Test Email", "html": html},
                 timeout=15,
             )
             if resp.status_code in (200, 201):
@@ -316,7 +316,7 @@ async def send_test_email():
         return {"ok": False, "error": "Set RESEND_API_KEY (recommended) or GMAIL_USER + GMAIL_APP_PASSWORD. Railway blocks SMTP — Resend is required on Railway."}
     try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = "Apex Trading System — Test Email"
+        msg["Subject"] = "Sable Stocks — Test Email"
         msg["From"] = gmail_user
         msg["To"] = notify
         msg.attach(MIMEText(html, "html"))
@@ -443,7 +443,7 @@ async def pipeline_test():
 async def serve_root():
     if _DASHBOARD_HTML.exists():
         return FileResponse(str(_DASHBOARD_HTML))
-    return {"message": "Apex Trading System — place dashboard/index.html to serve the UI"}
+    return {"message": "Sable Stocks — place dashboard/index.html to serve the UI"}
 
 
 @app.get("/{path:path}", include_in_schema=False)

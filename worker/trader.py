@@ -1,5 +1,5 @@
 """
-worker/trader.py — Main trading worker for Apex Trading System.
+worker/trader.py — Main trading worker for Sable Stocks.
 
 Runs Monday-Friday 9:25 AM - 4:05 PM ET using APScheduler.
 Fetches SPY bars from Alpaca (yfinance fallback), runs MomentumBreakout strategy,
@@ -661,7 +661,7 @@ def main():
         logger.info("No regime model found — worker will use default 'Weak Trend'")
         logger.info("Run `python backtest/run.py` to train and save the model")
 
-    logger.info("Apex Trading Worker starting...")
+    logger.info("Sable Stocks worker starting...")
     _startup_catchup()
 
     _scheduler = BlockingScheduler(timezone="America/New_York")

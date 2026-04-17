@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Apex Trading System</title>
+  <title>Sable Stocks</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { font-family: 'Courier New', Courier, monospace; }
@@ -36,8 +36,8 @@
 <div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
   <div class="bg-gray-900 border border-gray-700 rounded-lg p-8 w-full max-w-sm">
     <div class="text-center mb-8">
-      <div class="text-green-400 text-2xl font-bold tracking-widest mb-1">▲ APEX</div>
-      <div class="text-gray-400 text-xs tracking-widest uppercase">Trading System</div>
+      <div class="text-green-400 text-2xl font-bold tracking-widest mb-1">SABLE STOCKS</div>
+      <div class="text-gray-400 text-xs tracking-widest uppercase">Automated Trading</div>
     </div>
     <div class="mb-4">
       <label class="block text-gray-400 text-xs uppercase tracking-wider mb-2">Dashboard Secret</label>
@@ -65,8 +65,8 @@
   <!-- Header -->
   <header class="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
     <div class="flex items-center gap-3">
-      <span class="text-green-400 font-bold tracking-widest">▲ APEX</span>
-      <span class="text-gray-500 text-xs hidden sm:inline uppercase tracking-wider">Trading System</span>
+      <span class="text-green-400 font-bold tracking-widest">SABLE STOCKS</span>
+      <span class="text-gray-500 text-xs hidden sm:inline uppercase tracking-wider">Automated Trading</span>
       <span id="hdr-status-badge" class="badge bg-gray-700 text-gray-400">LOADING</span>
       <span id="hdr-spy-price" class="text-gray-500 text-xs hidden sm:inline">SPY —</span>
     </div>
@@ -383,7 +383,7 @@ function exportCsv(type) {
     .then(blob => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = type === 'trades' ? 'apex_trades.csv' : 'apex_near_misses.csv';
+      a.download = type === 'trades' ? 'sable_trades.csv' : 'sable_near_misses.csv';
       a.click();
     });
 }

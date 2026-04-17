@@ -1,13 +1,10 @@
 """
-worker/email_report.py — Email reports for Apex Trading System.
+worker/email_report.py — Email reports for Sable Stocks.
 
 Three emails per trading day:
   9:25 AM  — Morning brief: regime, breakout level, entry plan
   12:00 PM — Noon update: morning recap, P&L, near-misses
   4:05 PM  — EOD summary: full trade log, gates, anomalies
-
-Sends via Gmail SMTP using GMAIL_USER + GMAIL_APP_PASSWORD.
-Graceful degradation: logs a warning and returns if env vars are missing.
 """
 import os
 import smtplib
@@ -75,7 +72,7 @@ def _smtp_send(to: str, subject: str, html: str):
 def _resend_send(api_key: str, to: str, subject: str, html: str):
     """Send via Resend HTTP API (port 443 — not blocked by Railway)."""
     import requests
-    from_addr = os.getenv("RESEND_FROM", "Apex Trading <onboarding@resend.dev>")
+    from_addr = os.getenv("RESEND_FROM", "Sable Stocks <onboarding@resend.dev>")
     try:
         resp = requests.post(
             "https://api.resend.com/emails",
@@ -116,8 +113,9 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
     if not to:
         return
 
-    today_str = date.today().isoformat()
-    subject   = f"ATS Morning Brief | {today_str} | Day {session_day}/20 | {regime}"
+    today_str  = date.today().isoformat()
+    month_day  = date.today().strftime("%b %-d")
+    subject    = f"Sable Stocks | Morning Brief | {month_day} | Day {session_day}/20"
 
     pct_gap = (breakout_level - spy_price) / spy_price * 100 if spy_price > 0 else 0
     stop_lvl   = round(breakout_level - atr, 2)
@@ -159,7 +157,7 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
 
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>{_SHARED_CSS}</style></head><body>
-  <h2>▲ APEX — Morning Brief</h2>
+  <h2>◆ SABLE STOCKS — Morning Brief</h2>
   <p style="color:#888">Day <strong style="color:#e0e0e0">{session_day}/20</strong> &nbsp;|&nbsp; {today_str}
   &nbsp;|&nbsp; Trading window: <strong style="color:#00e676">9:30 AM – 3:30 PM ET</strong></p>
 
@@ -202,9 +200,10 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
         return
 
     today_str  = date.today().isoformat()
+    month_day  = date.today().strftime("%b %-d")
     pnl_color  = "#00c853" if daily_pnl >= 0 else "#d50000"
     trades_rem = max(0, 3 - trade_count)
-    subject    = f"ATS Noon Update | {today_str} | P&L: ${daily_pnl:+.0f} | {trade_count} trade{'s' if trade_count != 1 else ''}"
+    subject    = f"Sable Stocks | Midday Update | {month_day} | Day {session_day}/20"
 
     # Morning near-miss narrative
     nm_count = len(near_misses_am)
@@ -228,7 +227,7 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
 
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
 <style>{_SHARED_CSS}</style></head><body>
-  <h2>▲ APEX — Noon Update</h2>
+  <h2>◆ SABLE STOCKS — Midday Update</h2>
   <p style="color:#888">Day <strong style="color:#e0e0e0">{session_day}/20</strong> &nbsp;|&nbsp; {today_str}
   &nbsp;|&nbsp; <strong style="color:#ff6d00">3h 30m remaining</strong> in session</p>
 
@@ -276,7 +275,8 @@ def send_daily_report(trade_day_n: int = 1):
 
     pnl       = summary.get("gross_pnl", 0.0) if summary else 0.0
     today_str = date.today().isoformat()
-    subject   = f"ATS Daily | {today_str} | P&L: ${pnl:+.0f} | Day {trade_day_n}/20"
+    month_day = date.today().strftime("%b %-d")
+    subject   = f"Sable Stocks | End of Day | {month_day} | P&L: ${pnl:+.0f}"
 
     html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses)
     _smtp_send(to, subject, html_body)
@@ -414,7 +414,7 @@ def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trad
   <style>{_SHARED_CSS}</style>
 </head>
 <body>
-  <h2>APEX TRADING SYSTEM — Daily Report</h2>
+  <h2>◆ SABLE STOCKS — End of Day Report</h2>
   <p style="color:#888">Day <strong style="color:#e0e0e0">{trade_day_n}/20</strong> &nbsp;|&nbsp; {today_str}</p>
 
   <div>
@@ -465,6 +465,6 @@ def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trad
   <p>Status: <strong>{status_str}</strong> &nbsp;|&nbsp; Kill Switch: <strong style="color:{'#d50000' if kill_active else '#00c853'}">{'ACTIVE' if kill_active else 'INACTIVE'}</strong></p>
   <p>Regime: <strong>{regime_str}</strong></p>
   <hr style="border-color:#333">
-  <p style="font-size:10px;color:#555">Apex Trading System — automated paper trading report</p>
+  <p style="font-size:10px;color:#555">Sable Stocks — automated paper trading report</p>
 </body>
 </html>"""

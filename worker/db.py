@@ -1,5 +1,5 @@
 """
-worker/db.py — Database layer for Apex Trading System.
+worker/db.py — Database layer for Sable Stocks.
 
 SQLAlchemy 2.0. Reads DATABASE_URL from env.
 Falls back to sqlite:///./logs/trades.db if not set.

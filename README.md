@@ -1,4 +1,4 @@
-# Apex Trading System
+# Sable Stocks
 
 Automated SPY paper trading system. One Railway service runs everything: dashboard, API, and trading worker.
 
