@@ -25,6 +25,69 @@ from worker.db import (
 )
 from worker.news import fetch_news, analyze_with_claude
 
+_TLDR_FALLBACKS = {
+    "morning": "Sable Stocks is live and scanning for SPY breakout setups. Check the regime and key levels below to know what to expect today.",
+    "noon":    "Here's where things stand at midday. Review the morning recap and afternoon outlook below.",
+    "eod":     "The trading day is over. Here's your full summary — P&L, trades, and gate progress.",
+}
+
+
+def _generate_tldr(email_type: str, context: dict) -> str:
+    """Call Claude to produce a 2-3 sentence plain-English 'WHAT THIS MEANS' summary."""
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return _TLDR_FALLBACKS.get(email_type, "")
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        ctx_lines = "\n".join(f"  {k}: {v}" for k, v in context.items())
+        type_instructions = {
+            "morning": (
+                "This is the 9:25 AM morning briefing. Tell Ethan in 2-3 casual sentences "
+                "whether today looks like a trading day or not, and what he should watch for. "
+                "Be direct and specific — mention the regime and how close SPY is to breakout."
+            ),
+            "noon": (
+                "This is the 12:00 PM midday update. Tell Ethan in 2-3 casual sentences "
+                "how the morning went and what the afternoon holds. Mention P&L, trade count, "
+                "and whether more setups could fire."
+            ),
+            "eod": (
+                "This is the 4:05 PM end-of-day summary. Tell Ethan in 2-3 casual sentences "
+                "how the day went overall — profit or loss, whether the system behaved as expected, "
+                "and one key takeaway."
+            ),
+        }.get(email_type, "Summarize the data in 2-3 casual sentences for Ethan.")
+        prompt = (
+            f"You are writing for Ethan, who runs Sable Stocks — an automated SPY paper trading system.\n"
+            f"Context data:\n{ctx_lines}\n\n"
+            f"{type_instructions}\n"
+            f"Write in a calm, clear, personal tone — like a smart friend giving a quick briefing. "
+            f"No bullet points. No headers. Just 2-3 sentences of plain English."
+        )
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.warning(f"TLDR generation failed (non-fatal): {e}")
+        return _TLDR_FALLBACKS.get(email_type, "")
+
+
+def _build_tldr_box(text: str) -> str:
+    """Wrap the WHAT THIS MEANS text in a styled HTML box."""
+    if not text:
+        return ""
+    return f"""
+  <div style="background:#0a1a0a;border:1px solid #00e676;border-left:4px solid #00e676;
+              padding:14px 18px;border-radius:4px;margin:12px 0 20px 0">
+    <div style="font-size:10px;color:#00e676;text-transform:uppercase;
+                letter-spacing:.1em;margin-bottom:8px;font-weight:bold">What This Means</div>
+    <p style="color:#e0e0e0;font-size:14px;line-height:1.6;margin:0">{text}</p>
+  </div>"""
+
 _SHARED_CSS = """
   body { font-family: 'Courier New', monospace; background: #0d0d0d; color: #e0e0e0; margin: 0; padding: 20px; }
   h2 { color: #00e676; border-bottom: 1px solid #333; padding-bottom: 8px; }
@@ -129,6 +192,16 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
 
     trading_blocked = regime in ("Range-Bound", "Extreme Volatility")
 
+    tldr = _generate_tldr("morning", {
+        "regime":          regime,
+        "spy_price":       f"${spy_price:.2f}",
+        "breakout_level":  f"${breakout_level:.2f}",
+        "gap_to_breakout": f"{pct_gap:+.2f}%",
+        "trading_blocked": trading_blocked,
+        "session_day":     f"{session_day}/20",
+    })
+    tldr_box = _build_tldr_box(tldr)
+
     regime_color = {
         "Strong Trend":    "#00c853",
         "Weak Trend":      "#82b1ff",
@@ -166,6 +239,7 @@ def send_morning_brief(session_day: int, regime: str, spy_price: float,
   <h2>◆ SABLE STOCKS — Morning Brief</h2>
   <p style="color:#888">Day <strong style="color:#e0e0e0">{session_day}/20</strong> &nbsp;|&nbsp; {today_str}
   &nbsp;|&nbsp; Trading window: <strong style="color:#00e676">9:30 AM – 3:30 PM ET</strong></p>
+  {tldr_box}
 
   <h3>TODAY'S REGIME</h3>
   <div style="background:#1a1a1a;border-left:4px solid {regime_color};padding:10px 16px;border-radius:4px;margin:8px 0">
@@ -221,6 +295,17 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
     trades_rem = max(0, 3 - trade_count)
     subject    = f"Sable Stocks | Midday Update | {month_day} | Day {session_day}/20"
 
+    tldr = _generate_tldr("noon", {
+        "daily_pnl":    f"${daily_pnl:+.0f}",
+        "trade_count":  trade_count,
+        "trades_left":  trades_rem,
+        "regime":       regime,
+        "spy_price":    f"${spy_price:.2f}",
+        "in_position":  in_position,
+        "session_day":  f"{session_day}/20",
+    })
+    tldr_box = _build_tldr_box(tldr)
+
     # Morning near-miss narrative
     nm_count = len(near_misses_am)
     if nm_count == 0:
@@ -246,6 +331,7 @@ def send_noon_update(session_day: int, daily_pnl: float, trade_count: int,
   <h2>◆ SABLE STOCKS — Midday Update</h2>
   <p style="color:#888">Day <strong style="color:#e0e0e0">{session_day}/20</strong> &nbsp;|&nbsp; {today_str}
   &nbsp;|&nbsp; <strong style="color:#ff6d00">3h 30m remaining</strong> in session</p>
+  {tldr_box}
 
   <div>
     <div class="stat"><div class="stat-val" style="color:{pnl_color}">${daily_pnl:+.0f}</div><div class="stat-label">P&amp;L So Far</div></div>
@@ -296,12 +382,24 @@ def send_daily_report(trade_day_n: int = 1):
     headlines     = fetch_news(max_items=5)
     analysis      = analyze_with_claude(headlines)
 
-    pnl       = summary.get("gross_pnl", 0.0) if summary else 0.0
-    today_str = date.today().isoformat()
-    month_day = date.today().strftime("%b %-d")
-    subject   = f"Sable Stocks | End of Day | {month_day} | P&L: ${pnl:+.0f}"
+    pnl          = summary.get("gross_pnl", 0.0) if summary else 0.0
+    total_trades = summary.get("total_trades", 0) if summary else 0
+    win_rate     = summary.get("win_rate", 0.0) if summary else 0.0
+    today_str    = date.today().isoformat()
+    month_day    = date.today().strftime("%b %-d")
+    subject      = f"Sable Stocks | End of Day | {month_day} | P&L: ${pnl:+.0f}"
 
-    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses, headlines, analysis)
+    tldr = _generate_tldr("eod", {
+        "pnl":          f"${pnl:+.0f}",
+        "total_trades": total_trades,
+        "win_rate":     f"{win_rate:.1%}",
+        "regime":       system_status.get("regime", "Unknown") if system_status else "Unknown",
+        "session_day":  f"{trade_day_n}/20",
+        "gates_passed": gates.get("all_passed", False) if gates else False,
+    })
+    tldr_box = _build_tldr_box(tldr)
+
+    html_body = _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses, headlines, analysis, tldr_box)
     _smtp_send(to, subject, html_body)
 
 
@@ -406,7 +504,7 @@ def _build_signal_readiness_section(near_misses: list) -> str:
     <p style="color:#ccc;margin-top:8px">{narrative}</p>"""
 
 
-def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses=None, headlines=None, analysis="") -> str:
+def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trade_day_n, near_misses=None, headlines=None, analysis="", tldr_box="") -> str:
     today_str = date.today().isoformat()
     pnl = summary.get("gross_pnl", 0.0) if summary else 0.0
     pnl_color = "#00c853" if pnl >= 0 else "#d50000"
@@ -499,6 +597,7 @@ def _build_html(summary, trades, gates, risk_log, anomalies, system_status, trad
 <body>
   <h2>◆ SABLE STOCKS — End of Day Report</h2>
   <p style="color:#888">Day <strong style="color:#e0e0e0">{trade_day_n}/20</strong> &nbsp;|&nbsp; {today_str}</p>
+  {tldr_box}
 
   <div>
     <div class="stat">
