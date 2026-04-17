@@ -330,6 +330,38 @@ async def send_test_email():
         return {"ok": False, "error": str(e)}
 
 
+@app.post("/api/debug/send-morning-brief", dependencies=[Depends(verify_auth)])
+async def trigger_morning_brief():
+    """Immediately send the morning brief email using current DB state."""
+    from worker.email_report import send_morning_brief
+    from worker.db import get_latest_status, get_last_near_miss, get_recent_trades
+
+    status     = get_latest_status()
+    near_miss  = get_last_near_miss()
+    trades     = get_recent_trades(n=1)
+
+    session_day     = int(status.get("session_day") or 1) if status else 1
+    regime          = str(status.get("regime") or "Weak Trend") if status else "Weak Trend"
+    spy_price       = float(near_miss.get("close") or 0.0)
+    breakout_level  = float(near_miss.get("breakout_level") or spy_price)
+    atr             = float((trades[0].get("atr_at_entry") or 2.0) if trades else 2.0)
+
+    try:
+        send_morning_brief(
+            session_day=session_day,
+            regime=regime,
+            spy_price=spy_price,
+            breakout_level=breakout_level,
+            atr=atr,
+        )
+        notify = os.getenv("NOTIFY_EMAIL") or os.getenv("GMAIL_USER", "")
+        logger.info(f"Manual morning brief sent → {notify}")
+        return {"ok": True, "sent_to": notify, "session_day": session_day, "regime": regime}
+    except Exception as e:
+        logger.error(f"Manual morning brief failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/export/trades.csv", dependencies=[Depends(verify_auth)])
 async def export_trades_csv():
     """Download all trades as CSV."""
