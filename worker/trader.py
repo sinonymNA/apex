@@ -612,20 +612,20 @@ def noon_update_job():
 
 # ── Startup & shutdown ────────────────────────────────────────────────────────
 def _startup_catchup():
-    """On boot, immediately send any email whose window already opened today."""
+    """On boot, fire missed emails only within a 45-min grace window."""
     now = _now_et()
     if now.weekday() >= 5:   # weekend — no emails
         return
     t = now.time()
-    # Morning brief window: 9:25 AM – 11:59 AM
-    if time(9, 25) <= t < time(12, 0):
+    # Morning brief: fire only if within 45 min of 9:25 AM
+    if time(9, 25) <= t < time(10, 10):
         logger.info("Startup catch-up: sending morning brief")
         try:
             morning_brief_job()
         except Exception as e:
             logger.error(f"Startup morning brief failed: {e}")
-    # EOD window: 4:05 PM – midnight
-    elif t >= time(16, 5):
+    # EOD: fire only if within 45 min of 4:05 PM
+    elif time(16, 5) <= t < time(16, 50):
         logger.info("Startup catch-up: sending EOD report")
         try:
             end_of_day_job()
