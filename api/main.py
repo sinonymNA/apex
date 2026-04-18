@@ -35,6 +35,7 @@ from worker.db import (  # noqa: E402
     get_recent_anomalies,
     get_recent_near_misses,
     get_recent_trades,
+    get_revenue_summary,
     get_risk_log,
     get_today_summary,
     init_db,
@@ -169,6 +170,12 @@ async def get_trades(limit: int = Query(default=50, ge=1, le=200)):
 async def get_gates():
     data = get_gate_status()
     return data or {"message": "No gate data yet"}
+
+
+@app.get("/api/revenue", dependencies=[Depends(verify_auth)])
+async def get_revenue():
+    """Aggregated P&L, trade stats, gate progress, and system state for Sable Agents."""
+    return get_revenue_summary()
 
 
 @app.get("/api/risk-log", dependencies=[Depends(verify_auth)])

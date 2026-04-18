@@ -449,5 +449,83 @@ def get_today_near_misses() -> list:
         return [r.to_dict() for r in rows]
 
 
+def get_revenue_summary() -> dict:
+    """Aggregate P&L, trade counts, win rate, gates, and system state for /api/revenue."""
+    from sqlalchemy import func, cast, Date as SADate
+    today      = date.today()
+    month_start = today.replace(day=1)
+
+    with Session(engine) as s:
+        # ── All-time trades ───────────────────────────────────────────────────
+        all_trades = s.query(Trade).all()
+        pnls_all   = [t.pnl_dollars or 0.0 for t in all_trades]
+        wins_all   = [p for p in pnls_all if p > 0]
+        total_pnl       = sum(pnls_all)
+        trade_count_total = len(all_trades)
+        win_rate          = (len(wins_all) / trade_count_total * 100) if trade_count_total else 0.0
+
+        # ── Today ─────────────────────────────────────────────────────────────
+        today_trades = (
+            s.query(Trade)
+            .filter(cast(Trade.exit_time, SADate) == today)
+            .all()
+        )
+        daily_pnl        = sum(t.pnl_dollars or 0.0 for t in today_trades)
+        trade_count_today = len(today_trades)
+
+        # ── Last 7 calendar days ──────────────────────────────────────────────
+        from datetime import timedelta
+        week_ago = today - timedelta(days=7)
+        weekly_trades = (
+            s.query(Trade)
+            .filter(cast(Trade.exit_time, SADate) > week_ago)
+            .all()
+        )
+        weekly_pnl = sum(t.pnl_dollars or 0.0 for t in weekly_trades)
+
+        # ── This calendar month ───────────────────────────────────────────────
+        monthly_trades = (
+            s.query(Trade)
+            .filter(cast(Trade.exit_time, SADate) >= month_start)
+            .all()
+        )
+        monthly_pnl = sum(t.pnl_dollars or 0.0 for t in monthly_trades)
+
+        # ── Gate status ───────────────────────────────────────────────────────
+        gate = s.query(GateStatus).order_by(GateStatus.id.desc()).first()
+        g = gate.to_dict() if gate else {}
+
+        def _gv(key, default=0.0):
+            v = g.get(key)
+            return v if v is not None else default
+
+        gate_progress = {
+            "net_return":    {"value": _gv("gate1_return"),      "target": 0.0,    "passed": _gv("gate1_return") > 0},
+            "violations":    {"value": int(_gv("gate2_violations", 0)), "target": 3, "passed": _gv("gate2_violations", 99) < 3},
+            "max_drawdown":  {"value": _gv("gate3_drawdown"),    "target": -8000,  "passed": _gv("gate3_drawdown", -9999) > -8000},
+            "win_rate":      {"value": _gv("gate4_winrate"),     "target": 38.0,   "passed": _gv("gate4_winrate") > 0.38},
+            "slippage":      {"value": _gv("gate5_slippage"),    "target": 0.10,   "passed": _gv("gate5_slippage", 99) < 0.10},
+        }
+
+        # ── System status ─────────────────────────────────────────────────────
+        st = s.query(SystemStatus).order_by(SystemStatus.id.desc()).first()
+        sv = st.to_dict() if st else {}
+
+        return {
+            "daily_pnl":          round(daily_pnl, 2),
+            "weekly_pnl":         round(weekly_pnl, 2),
+            "monthly_pnl":        round(monthly_pnl, 2),
+            "total_pnl":          round(total_pnl, 2),
+            "trade_count_today":  trade_count_today,
+            "trade_count_total":  trade_count_total,
+            "win_rate":           round(win_rate, 2),
+            "gate_day":           sv.get("session_day") or g.get("day_number") or 0,
+            "gate_progress":      gate_progress,
+            "paper_equity":       round(sv.get("daily_pnl") or 0.0, 2),
+            "regime":             sv.get("regime") or "Unknown",
+            "kill_switch_active": bool(sv.get("kill_switch_active", False)),
+        }
+
+
 # Auto-initialize on import
 init_db()
