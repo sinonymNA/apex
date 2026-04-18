@@ -15,6 +15,36 @@
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
     table { border-collapse: collapse; }
     td, th { white-space: nowrap; }
+
+    /* Matrix canvas */
+    #matrix-canvas {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none; z-index: 0;
+      opacity: 0.045;
+    }
+    #dashboard > *:not(#matrix-canvas) { position: relative; z-index: 1; }
+
+    /* Heartbeat line */
+    #heartbeat-svg { overflow: visible; }
+    #heartbeat-path {
+      stroke-dasharray: 300;
+      stroke-dashoffset: 300;
+      animation: drawBeat 2.4s ease-in-out infinite;
+    }
+    @keyframes drawBeat {
+      0%   { stroke-dashoffset: 300; opacity: 1; }
+      70%  { stroke-dashoffset: 0;   opacity: 1; }
+      85%  { stroke-dashoffset: 0;   opacity: 0.4; }
+      100% { stroke-dashoffset: 0;   opacity: 0; }
+    }
+
+    /* Pulse dot on SABLE STOCKS text */
+    @keyframes pulse-glow {
+      0%, 100% { text-shadow: 0 0 4px #00e676; }
+      50%       { text-shadow: 0 0 14px #00e676, 0 0 28px #00e676; }
+    }
+    .logo-pulse { animation: pulse-glow 3s ease-in-out infinite; }
   </style>
   <script>
     tailwind.config = {
@@ -62,12 +92,20 @@
 <!-- ═══════════════════════════ DASHBOARD ════════════════════════════════════ -->
 <div id="dashboard" class="hidden min-h-screen">
 
+  <!-- Matrix rain background -->
+  <canvas id="matrix-canvas"></canvas>
+
   <!-- Header -->
   <header class="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center justify-between sticky top-0 z-10">
     <div class="flex items-center gap-3">
-      <span class="text-green-400 font-bold tracking-widest">SABLE STOCKS</span>
+      <span class="text-green-400 font-bold tracking-widest logo-pulse">SABLE STOCKS</span>
       <span class="text-gray-500 text-xs hidden sm:inline uppercase tracking-wider">Automated Trading</span>
       <span id="hdr-status-badge" class="badge bg-gray-700 text-gray-400">LOADING</span>
+      <svg id="heartbeat-svg" width="64" height="22" viewBox="0 0 64 22" class="hidden sm:block">
+        <path id="heartbeat-path"
+          d="M0,11 L10,11 L14,3 L18,19 L22,11 L26,11 L30,6 L34,16 L36,11 L64,11"
+          fill="none" stroke="#00e676" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
       <span id="hdr-spy-price" class="text-gray-500 text-xs hidden sm:inline">SPY —</span>
     </div>
     <div class="flex items-center gap-3">
@@ -786,6 +824,39 @@ async function sendTestEmail() {
     setTimeout(resetBtn, 8000);
   }
 }
+
+// ── Matrix Rain ───────────────────────────────────────────────────────────────
+(function startMatrix() {
+  const canvas = document.getElementById('matrix-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const chars = '01アイウエオカキクケコサシスセソタチツテトナニヌネノ$#%&'.split('');
+  let cols, drops;
+
+  function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+    cols  = Math.floor(canvas.width / 16);
+    drops = Array.from({ length: cols }, () => Math.random() * -50);
+  }
+
+  function draw() {
+    ctx.fillStyle = 'rgba(3,7,18,0.18)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#00e676';
+    ctx.font = '13px Courier New';
+    for (let i = 0; i < cols; i++) {
+      const ch = chars[Math.floor(Math.random() * chars.length)];
+      ctx.fillText(ch, i * 16, drops[i] * 16);
+      if (drops[i] * 16 > canvas.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i]++;
+    }
+  }
+
+  resize();
+  window.addEventListener('resize', resize);
+  setInterval(draw, 60);
+})();
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 (function init() {
