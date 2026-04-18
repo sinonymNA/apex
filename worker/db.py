@@ -208,7 +208,40 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # column already exists — ignore
+    # Seed session day if tables are empty (first boot after PostgreSQL connect)
+    _seed_initial_state()
     logger.info("Database initialized.")
+
+
+def _seed_initial_state():
+    """
+    On first boot against an empty database, seed system_status and gate_status
+    with the session day from INITIAL_SESSION_DAY env var (default 1).
+    Safe to call repeatedly — only writes if both tables are empty.
+    """
+    session_day = int(os.getenv("INITIAL_SESSION_DAY", "1"))
+    with Session(engine) as s:
+        if s.query(SystemStatus).count() == 0:
+            s.add(SystemStatus(
+                status="RUNNING",
+                regime="Weak Trend",
+                trade_count_today=0,
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                kill_switch_active=False,
+                session_day=session_day,
+                message="Initial state seeded from INITIAL_SESSION_DAY",
+            ))
+            s.commit()
+            logger.info(f"Seeded system_status with session_day={session_day}")
+        if s.query(GateStatus).count() == 0:
+            s.add(GateStatus(
+                day_number=session_day,
+                all_passed=False,
+                notes=f"Seeded: Day {session_day}/20",
+            ))
+            s.commit()
+            logger.info(f"Seeded gate_status with day_number={session_day}")
 
 
 def log_trade(data: dict):
