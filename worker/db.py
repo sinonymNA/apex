@@ -30,13 +30,17 @@ if not DATABASE_URL:
     DATABASE_URL = f"sqlite:///{_log_dir}/trades.db"
 
 if "postgresql" in DATABASE_URL:
+    # Railway internal network doesn't need SSL; public proxy may.
+    # "prefer" tries SSL and falls back gracefully — works for both.
+    _ssl_mode = "prefer" if "sslmode" not in DATABASE_URL else None
+    _connect_args = {"sslmode": _ssl_mode} if _ssl_mode else {}
     engine = create_engine(
         DATABASE_URL,
         pool_pre_ping=True,
         pool_recycle=300,
-        connect_args={"sslmode": "require"},
+        connect_args=_connect_args,
     )
-    logger.info("PostgreSQL engine created with SSL + pool_pre_ping")
+    logger.info("PostgreSQL engine created with pool_pre_ping")
 else:
     engine = create_engine(
         DATABASE_URL,
