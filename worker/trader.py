@@ -709,10 +709,11 @@ def main():
         misfire_grace_time=7200,
     )
 
-    # End of day at 4:05 PM ET Mon-Fri
+    # End of day at 3:55 PM ET Mon-Fri — must fire before 4:00 PM close so that
+    # the DAY-order sell executes within the regular session.
     _scheduler.add_job(
         end_of_day_job,
-        CronTrigger(day_of_week="mon-fri", hour=16, minute=5),
+        CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
         id="end_of_day",
         name="End of Day",
         misfire_grace_time=14400,  # fire if within 4 hours of scheduled time
