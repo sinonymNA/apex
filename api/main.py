@@ -167,11 +167,12 @@ async def health_check():
         if client is None:
             alpaca_status = "error: API keys not set"
         else:
+            from alpaca.trading.enums import AccountStatus
             account = client.get_account()
-            if str(account.status).upper() == "ACTIVE":
+            if account.status == AccountStatus.ACTIVE:
                 alpaca_status = "connected"
             else:
-                alpaca_status = f"error: account status is {account.status}"
+                alpaca_status = f"error: {account.status}"
     except Exception as e:
         alpaca_status = f"error: {e}"
 
