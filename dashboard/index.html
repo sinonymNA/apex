@@ -145,6 +145,10 @@
             class="text-gray-500 hover:text-blue-400 text-xs border border-gray-700 hover:border-blue-600 rounded px-2 py-0.5 transition-colors">
             Test Email
           </button>
+          <button id="test-traderspost-btn" onclick="testTradersPost()"
+            class="text-gray-500 hover:text-purple-400 text-xs border border-gray-700 hover:border-purple-600 rounded px-2 py-0.5 transition-colors">
+            Test TradersPost
+          </button>
           <span id="syscheck-summary" class="text-xs text-gray-500">Checking…</span>
         </div>
       </div>
@@ -821,6 +825,42 @@ async function sendTestEmail() {
     if (e.name === 'AbortError') {
       alert('Email request timed out after 35 seconds.\n\nMost likely cause: GMAIL_APP_PASSWORD is wrong or not set.\n\nGo to Railway Variables and verify:\n- GMAIL_USER = your Gmail address\n- GMAIL_APP_PASSWORD = 16-character App Password (NOT your Gmail login password)\n- NOTIFY_EMAIL = where to send reports\n\nGenerate an App Password: Google Account → Security → 2-Step Verification → App passwords');
     }
+    setTimeout(resetBtn, 8000);
+  }
+}
+
+// ── Test TradersPost ──────────────────────────────────────────────────────────
+async function testTradersPost() {
+  const btn = document.getElementById('test-traderspost-btn');
+  const resetBtn = () => {
+    btn.textContent = 'Test TradersPost';
+    btn.disabled = false;
+    btn.className = 'text-gray-500 hover:text-purple-400 text-xs border border-gray-700 hover:border-purple-600 rounded px-2 py-0.5 transition-colors';
+  };
+  btn.textContent = 'Sending…';
+  btn.disabled = true;
+  btn.className = 'text-yellow-400 text-xs border border-yellow-800 rounded px-2 py-0.5';
+
+  try {
+    const r = await fetch('/api/debug/test-traderspost', {
+      method: 'POST',
+      headers: { 'X-Dashboard-Secret': _secret },
+    });
+    const data = await r.json();
+    if (data.ok) {
+      btn.textContent = `✓ ${data.status_code}`;
+      btn.className = 'text-green-400 text-xs border border-green-800 rounded px-2 py-0.5';
+      alert(`TradersPost OK (HTTP ${data.status_code})\n\nResponse: ${data.response}`);
+    } else {
+      btn.textContent = 'Failed ✗';
+      btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
+      alert('TradersPost failed: ' + (data.error || 'Unknown error'));
+    }
+    setTimeout(resetBtn, 8000);
+  } catch (e) {
+    btn.textContent = 'Error';
+    btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
+    alert('TradersPost request error: ' + e.message);
     setTimeout(resetBtn, 8000);
   }
 }
