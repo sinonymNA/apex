@@ -494,17 +494,35 @@ def market_open_job():
 
 
 def end_of_day_job():
-    """4:05 PM ET: force-close any open position, compute summary, send email."""
+    """3:55 PM ET: force-close any open position, compute summary, send email."""
     logger.info("End of day — running EOD procedure")
 
-    # Force-close any open position
-    if _state["current_position"] is not None:
-        df = _fetch_bars()
-        if df is not None and not df.empty:
-            exit_price = float(df["Close"].iloc[-1])
-        else:
-            exit_price = _state["current_position"]["entry"]  # fallback
-        _close_position("end_of_day", exit_price)
+    # Always query Alpaca directly — _state["current_position"] is not the source
+    # of truth here. A crash or missed signal could leave an orphan broker position.
+    client = _get_trading_client()
+    if client is not None:
+        try:
+            positions = client.get_all_positions()
+            if positions:
+                logger.info(
+                    f"EOD close: found {len(positions)} open positions, closing all"
+                )
+                client.close_all_positions(cancel_orders=True)
+            else:
+                logger.info("EOD close: no open positions at Alpaca")
+        except Exception as e:
+            logger.error(f"EOD Alpaca close failed: {e}")
+    else:
+        # Simulated mode — Alpaca unavailable, fall back to in-memory state
+        if _state["current_position"] is not None:
+            df = _fetch_bars()
+            if df is not None and not df.empty:
+                exit_price = float(df["Close"].iloc[-1])
+            else:
+                exit_price = _state["current_position"]["entry"]
+            _close_position("end_of_day", exit_price)
+
+    _state["current_position"] = None
 
     # Increment session day counter
     _state["session_day"] += 1
