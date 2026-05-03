@@ -630,7 +630,29 @@ def noon_update_job():
 
 # ── Startup & shutdown ────────────────────────────────────────────────────────
 def _startup_catchup():
-    """On boot, fire missed emails only within a 45-min grace window."""
+    """On boot: reconcile broker positions, then fire missed emails within a 45-min grace window."""
+
+    # ── Position reconciliation (runs unconditionally, before scheduler starts) ─
+    client = _get_trading_client()
+    if client is not None:
+        try:
+            positions = client.get_all_positions()
+            spy_pos = next((p for p in positions if p.symbol == SYMBOL), None)
+            if spy_pos is not None:
+                qty = int(spy_pos.qty)
+                avg_price = float(spy_pos.avg_entry_price)
+                logger.warning(
+                    f"Orphan position detected on startup: {qty} shares {SYMBOL} "
+                    f"@ ${avg_price:.2f}, closing immediately"
+                )
+                client.close_all_positions(cancel_orders=True)
+                _state["current_position"] = None
+            else:
+                logger.info("Startup reconciliation: no open positions at Alpaca")
+        except Exception as e:
+            logger.error(f"Startup position reconciliation failed: {e}")
+
+    # ── Missed-email catch-up (weekdays only, within 45-min grace windows) ──────
     now = _now_et()
     if now.weekday() >= 5:   # weekend — no emails
         return
@@ -642,8 +664,8 @@ def _startup_catchup():
             morning_brief_job()
         except Exception as e:
             logger.error(f"Startup morning brief failed: {e}")
-    # EOD: fire only if within 45 min of 4:05 PM
-    elif time(16, 5) <= t < time(16, 50):
+    # EOD: fire only if within 45 min of 3:55 PM
+    elif time(15, 55) <= t < time(16, 40):
         logger.info("Startup catch-up: sending EOD report")
         try:
             end_of_day_job()
