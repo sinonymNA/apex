@@ -278,6 +278,29 @@ async def get_near_misses(limit: int = Query(default=20, ge=1, le=100)):
     return get_recent_near_misses(n=limit)
 
 
+@app.post("/api/debug/test-traderspost", dependencies=[Depends(verify_auth)])
+async def test_traderspost():
+    """Send a test buy signal to TradersPost and return the raw response."""
+    import httpx
+
+    webhook_url = os.getenv("TRADERSPOST_WEBHOOK_URL")
+    if not webhook_url:
+        return {"ok": False, "error": "TRADERSPOST_WEBHOOK_URL not set"}
+
+    payload = {"ticker": "ESM2026", "action": "buy", "contracts": 1}
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(webhook_url, json=payload, timeout=5.0)
+        return {
+            "ok": True,
+            "status_code": response.status_code,
+            "response": response.text,
+            "payload_sent": payload,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.post("/api/debug/send-test-email", dependencies=[Depends(verify_auth)])
 async def send_test_email():
     """Send a test email using Resend (preferred) or SMTP fallback."""

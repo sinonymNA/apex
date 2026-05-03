@@ -153,6 +153,48 @@ def _fetch_bars():
     return df
 
 
+async def send_traderspost_signal(action: str, contracts: int = 1):
+    """Send trading signal to TradersPost/Tradovate."""
+    import httpx
+
+    webhook_url = os.getenv("TRADERSPOST_WEBHOOK_URL")
+    if not webhook_url:
+        logger.warning("TRADERSPOST_WEBHOOK_URL not set, skipping")
+        return
+
+    payload = {
+        "ticker": "ESM2026",
+        "action": action,
+        "contracts": contracts,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                webhook_url,
+                json=payload,
+                timeout=5.0,
+            )
+            logger.info(
+                f"TradersPost signal sent: {action} | "
+                f"Status: {response.status_code} | "
+                f"Response: {response.text}"
+            )
+    except Exception as e:
+        logger.error(f"TradersPost signal failed: {e}")
+
+
+def _fire_traderspost(action: str, contracts: int = 1):
+    """Non-blocking sync wrapper — spawns a daemon thread to run the async signal."""
+    import asyncio
+    import threading
+
+    threading.Thread(
+        target=lambda: asyncio.run(send_traderspost_signal(action, contracts)),
+        daemon=True,
+    ).start()
+
+
 def _place_buy_order(signal: dict) -> dict | None:
     """
     Place a paper buy order via Alpaca.
@@ -298,6 +340,8 @@ def _close_position(reason: str, exit_price: float):
 
     # Place sell order (fire-and-forget — position may already be closed by stop)
     _place_sell_order(qty)
+    _fire_traderspost("exit" if reason == "end_of_day" else "sell",
+                      0 if reason == "end_of_day" else 1)
 
     # Check kill switch after trade
     ks = risk.check_kill_switch(
@@ -316,6 +360,7 @@ def _close_position(reason: str, exit_price: float):
             "consecutive_losses": _state["consecutive_losses"],
             "current_equity": _state["current_equity"],
         })
+        _fire_traderspost("exit", 0)
 
 
 # ── APScheduler jobs ──────────────────────────────────────────────────────────
@@ -434,6 +479,7 @@ def five_min_bar_job():
     order = _place_buy_order(signal)
     if order is None:
         return
+    _fire_traderspost("buy", 1)
 
     levels = _strategy.get_levels(signal["price"], signal["atr"])
     _state["current_position"] = {
@@ -508,6 +554,7 @@ def end_of_day_job():
                     f"EOD close: found {len(positions)} open positions, closing all"
                 )
                 client.close_all_positions(cancel_orders=True)
+                _fire_traderspost("exit", 0)
             else:
                 logger.info("EOD close: no open positions at Alpaca")
         except Exception as e:
