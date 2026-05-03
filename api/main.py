@@ -149,6 +149,106 @@ async def health():
     }
 
 
+@app.get("/api/health-check")
+async def health_check():
+    """Full readiness check — tests Alpaca, TradersPost, scheduler, and position state."""
+    import httpx
+    import pytz
+    from datetime import time as dt_time
+
+    ET = pytz.timezone("America/New_York")
+    now_et = datetime.now(ET)
+
+    # ── Alpaca ────────────────────────────────────────────────────────────────
+    alpaca_status = "error: API keys not set"
+    try:
+        from worker.trader import _get_trading_client
+        client = _get_trading_client()
+        if client is None:
+            alpaca_status = "error: API keys not set"
+        else:
+            account = client.get_account()
+            if str(account.status).upper() == "ACTIVE":
+                alpaca_status = "connected"
+            else:
+                alpaca_status = f"error: account status is {account.status}"
+    except Exception as e:
+        alpaca_status = f"error: {e}"
+
+    # ── TradersPost — lightweight ping (GET, no trade triggered) ──────────────
+    traderspost_status = "error: TRADERSPOST_WEBHOOK_URL not set"
+    webhook_url = os.getenv("TRADERSPOST_WEBHOOK_URL")
+    if webhook_url:
+        try:
+            async with httpx.AsyncClient() as http:
+                # HEAD/GET to the URL — any HTTP response means the endpoint is up
+                r = await http.get(webhook_url, timeout=5.0)
+            # 4xx is fine (endpoint exists but rejects GETs); 5xx or timeout = error
+            traderspost_status = "connected" if r.status_code < 500 else f"error: HTTP {r.status_code}"
+        except Exception as e:
+            traderspost_status = f"error: {e}"
+
+    # ── Market open (regular session 9:30–16:00 ET, Mon–Fri) ─────────────────
+    t = now_et.time()
+    market_open = (
+        now_et.weekday() < 5
+        and dt_time(9, 30) <= t <= dt_time(16, 0)
+    )
+
+    # ── Current position — query Alpaca directly ──────────────────────────────
+    current_position = None
+    try:
+        from worker.trader import _get_trading_client, SYMBOL
+        pos_client = _get_trading_client()
+        if pos_client is not None:
+            positions = pos_client.get_all_positions()
+            spy = next((p for p in positions if p.symbol == SYMBOL), None)
+            if spy is not None:
+                current_position = {
+                    "symbol": spy.symbol,
+                    "qty": int(spy.qty),
+                    "avg_price": float(spy.avg_entry_price),
+                }
+    except Exception:
+        pass
+
+    # ── Kill switch & scheduler ───────────────────────────────────────────────
+    kill_switch = False
+    scheduler_status = "stopped"
+    try:
+        from worker import trader as _trader
+        kill_switch = bool(_trader._state.get("kill_switch_active", False))
+        if _trader._scheduler is not None and _trader._scheduler.running:
+            scheduler_status = "running"
+    except Exception:
+        pass
+
+    # ── Railway deployment stamp ──────────────────────────────────────────────
+    railway_deployed_at = os.getenv(
+        "RAILWAY_DEPLOYMENT_ID",
+        os.getenv("RAILWAY_SNAPSHOT_ID", "unknown"),
+    )
+
+    ready_to_trade = (
+        alpaca_status == "connected"
+        and traderspost_status == "connected"
+        and not kill_switch
+        and scheduler_status == "running"
+    )
+
+    return {
+        "alpaca": alpaca_status,
+        "traderspost": traderspost_status,
+        "market_open": market_open,
+        "current_position": current_position,
+        "kill_switch": kill_switch,
+        "scheduler": scheduler_status,
+        "es_front_month": "ESM2026",
+        "railway_deployed_at": railway_deployed_at,
+        "ready_to_trade": ready_to_trade,
+    }
+
+
 @app.get("/api/status", dependencies=[Depends(verify_auth)])
 async def get_status():
     data = get_latest_status()
