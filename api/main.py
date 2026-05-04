@@ -94,6 +94,15 @@ def _start_worker():
         logger.error(f"Failed to start trading worker: {e}")
 
 
+def _start_discord_bot():
+    """Start the SABLE Discord bot as a daemon thread (ignores errors)."""
+    try:
+        from discord_bot import start_bot
+        start_bot()
+    except Exception as e:
+        logger.error(f"Failed to start Discord bot: {e}")
+
+
 # ── Startup ────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -105,6 +114,9 @@ async def startup_event():
 
     # 3. Start trading worker (also non-blocking)
     threading.Thread(target=_start_worker, daemon=True, name="worker-launcher").start()
+
+    # 4. Start Discord bot (also non-blocking)
+    threading.Thread(target=_start_discord_bot, daemon=True, name="discord-launcher").start()
 
     # 4. Log whether dashboard HTML is present
     if _DASHBOARD_HTML.exists():
