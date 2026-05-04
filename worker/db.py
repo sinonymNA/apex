@@ -205,6 +205,12 @@ class NewsPost(Base):
     posted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Milestone(Base):
+    __tablename__ = "milestones"
+    key       = Column(String(64), primary_key=True)
+    fired_at  = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 def init_db():
     """Create all tables if they don't exist. Also runs additive column migrations."""
@@ -455,6 +461,18 @@ def get_today_near_misses() -> list:
             .all()
         )
         return [r.to_dict() for r in rows]
+
+
+def is_milestone_fired(key: str) -> bool:
+    with Session(engine) as session:
+        return session.get(Milestone, key) is not None
+
+
+def mark_milestone_fired(key: str):
+    with Session(engine) as session:
+        if session.get(Milestone, key) is None:
+            session.add(Milestone(key=key))
+            session.commit()
 
 
 def is_news_url_posted(url: str) -> bool:

@@ -14,6 +14,19 @@ import discord
 from loguru import logger
 
 # ── SABLE personality (injected into every Claude prompt) ─────────────────────
+# Eval P&L threshold (dollars) → (db key, message)
+# None threshold = triggered externally via post_milestone()
+MILESTONES = {
+    "eval_25":   (750,  "📈 **25% there.** Keep going."),
+    "eval_50":   (1500, "🔥 **Halfway to funded.**"),
+    "eval_75":   (2250, "💪 **75%. Almost there.**"),
+    "eval_100":  (3000, "🎉 **EVAL PASSED.**\n Account activating.\n First payout incoming."),
+    "funded":    (None, "✅ **FUNDED.** Real money mode."),
+    "payout":    (None, "💰 **FIRST DOLLAR.**\n This is real. This is working."),
+    "10k_month": (None, "🚀 **TEN THOUSAND.**\n Alex doesn't know yet."),
+    "all_5":     (None, "👑 **FULL STACK.**\n $13,500/month. October arrived."),
+}
+
 NEWS_RSS_URL = (
     "https://feeds.finance.yahoo.com/rss/2.0/headline"
     "?s=SPY&region=US&lang=en-US"
@@ -182,6 +195,30 @@ def post_kill_switch(daily_loss: float, buffer: float):
         f" Buffer: ${buffer:.2f} remaining\n"
         f" This is the system protecting you."
     )
+
+
+def check_milestones(eval_pnl: float):
+    """Called after every trade close — fires any newly crossed eval milestones."""
+    from worker.db import is_milestone_fired, mark_milestone_fired
+    for key, (threshold, message) in MILESTONES.items():
+        if threshold is None:
+            continue
+        if eval_pnl >= threshold and not is_milestone_fired(key):
+            mark_milestone_fired(key)
+            _post_feed(message)
+
+
+def post_milestone(key: str):
+    """Manually trigger a non-automatic milestone (funded, payout, 10k, all_5)."""
+    from worker.db import is_milestone_fired, mark_milestone_fired
+    entry = MILESTONES.get(key)
+    if entry is None:
+        logger.warning(f"Unknown milestone key: {key}")
+        return
+    _, message = entry
+    if not is_milestone_fired(key):
+        mark_milestone_fired(key)
+    _post_feed(message)
 
 
 def post_daily_summary(

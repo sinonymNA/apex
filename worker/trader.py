@@ -373,6 +373,13 @@ def _close_position(reason: str, exit_price: float):
     except Exception as _e:
         logger.warning(f"Discord exit notification failed: {_e}")
 
+    # Milestone check
+    try:
+        import discord_bot as _db
+        _db.check_milestones(_state["current_equity"] - 100_000.0)
+    except Exception as _e:
+        logger.warning(f"Milestone check failed: {_e}")
+
     # Check kill switch after trade
     ks = risk.check_kill_switch(
         _state["consecutive_losses"],
