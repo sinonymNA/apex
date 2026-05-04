@@ -931,6 +931,12 @@ def start_background():
 
     db.init_db()
 
+    try:
+        import discord_bot
+        discord_bot.set_state_getter(lambda: _state)
+    except Exception:
+        pass
+
     thread = threading.Thread(target=main, daemon=True, name="apex-trader")
     thread.start()
     logger.info(f"Trading worker started in background thread ({thread.name})")

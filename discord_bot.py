@@ -33,11 +33,88 @@ Your personality:
 - Keep responses under 300 words.
 - Talk like a trusted friend who knows markets, not a robot."""
 
-# ── Module-level state (set once bot connects) ────────────────────────────────
+# ── Module-level state ────────────────────────────────────────────────────────
 _bot: "discord.Client | None" = None
 _loop: "asyncio.AbstractEventLoop | None" = None
 _feed_channel: "discord.TextChannel | None" = None
 _talk_channel: "discord.TextChannel | None" = None
+_state_getter = None  # set by trader.py so we can read live trading state
+
+
+def set_state_getter(fn):
+    """Called by trader.py on startup to share live _state without circular imports."""
+    global _state_getter
+    _state_getter = fn
+
+
+def _build_context() -> str:
+    """Build a plain-English context block from live trader state."""
+    from datetime import date, timedelta
+
+    if _state_getter is None:
+        return ""
+
+    state = _state_getter()
+    eval_pnl   = state["current_equity"] - 100_000.0
+    daily_pnl  = state["daily_pnl"]
+    session_day = state["session_day"]
+    streak     = state.get("consecutive_wins", 0)
+
+    # Projected pass date based on current daily pace
+    projected_pass = projected_payout = "TBD"
+    if session_day > 0 and eval_pnl > 0:
+        daily_rate = eval_pnl / session_day
+        if daily_rate > 0:
+            days_left = max(0, (3000 - eval_pnl) / daily_rate)
+            projected_pass   = (date.today() + timedelta(days=days_left)).strftime("%B %d")
+            projected_payout = (date.today() + timedelta(days=days_left + 14)).strftime("%B %d")
+
+    today_trades = state.get("daily_trades", [])
+    wins = sum(1 for t in today_trades if (t.get("pnl_dollars") or 0) > 0)
+    trade_line = f"{len(today_trades)} trades ({wins}W {len(today_trades)-wins}L)" if today_trades else "0 trades"
+
+    pos = state.get("current_position")
+    position_line = (
+        f"In position: {pos['qty']} contracts @ ${pos['entry']:.2f}"
+        if pos else "No open position"
+    )
+
+    return (
+        f"Current eval P&L: ${eval_pnl:+.2f} / $3,000\n"
+        f"Today's P&L: ${daily_pnl:+.2f}\n"
+        f"Today's trades: {trade_line}\n"
+        f"Win streak: {streak}\n"
+        f"Days in eval: {session_day}\n"
+        f"Position: {position_line}\n"
+        f"Projected pass date: {projected_pass}\n"
+        f"Projected first payout: {projected_payout}\n"
+        f"Projected $10K/month: October 2026"
+    )
+
+
+async def _respond_to_ethan(user_message: str) -> str:
+    """Send Ethan's message to Claude with SABLE personality + live context."""
+    import anthropic
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "ANTHROPIC_API_KEY not set — I can't think right now."
+
+    context = _build_context()
+    prompt = f"{context}\n\nEthan says: {user_message}" if context else user_message
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            system=SABLE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"Claude response failed: {e}")
+        return "Something went wrong on my end. Check the logs."
 
 
 # ── Internal helper ───────────────────────────────────────────────────────────
@@ -155,6 +232,18 @@ async def _run_bot():
             await _feed_channel.send(
                 "🤖 **SABLE online.** Systems connected. Ready to trade."
             )
+
+    @_bot.event
+    async def on_message(message):
+        if message.author.bot:
+            return
+        if _talk_channel is None or message.channel.id != _talk_channel.id:
+            return
+
+        async with message.channel.typing():
+            reply = await _respond_to_ethan(message.content)
+
+        await message.channel.send(reply)
 
     token = os.getenv("DISCORD_BOT_TOKEN", "")
     if not token:
