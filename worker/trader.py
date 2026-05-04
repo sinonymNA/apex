@@ -44,6 +44,7 @@ _state = {
     "daily_pnl": 0.0,
     "trade_count": 0,
     "consecutive_losses": 0,
+    "consecutive_wins": 0,
     "peak_equity": 100_000.0,
     "current_equity": 100_000.0,
     "current_position": None,   # dict or None
@@ -307,8 +308,10 @@ def _close_position(reason: str, exit_price: float):
 
     if pnl_dollars > 0:
         _state["consecutive_losses"] = 0
+        _state["consecutive_wins"] += 1
     else:
         _state["consecutive_losses"] += 1
+        _state["consecutive_wins"] = 0
 
     trade_data = {
         "entry_time": pos.get("entry_time"),
@@ -343,6 +346,33 @@ def _close_position(reason: str, exit_price: float):
     _fire_traderspost("exit" if reason == "end_of_day" else "sell",
                       0 if reason == "end_of_day" else 1)
 
+    # Discord trade exit notification
+    try:
+        import discord_bot as _db
+        entry_time = pos.get("entry_time")
+        if entry_time:
+            elapsed = (datetime.now(timezone.utc) - entry_time).total_seconds()
+            mins, secs = divmod(int(elapsed), 60)
+            duration = f"{mins}m {secs}s"
+        else:
+            duration = "unknown"
+        reason_labels = {
+            "stop_hit": "Stop hit", "target_hit": "Target hit",
+            "max_hold_exceeded": "Time exit", "end_of_day": "EOD close",
+        }
+        running_pnl = _state["current_equity"] - 100_000.0
+        _db.post_trade_exit(
+            pnl=pnl_dollars,
+            entry=entry_price,
+            exit_price=exit_price,
+            duration=duration,
+            running_pnl=running_pnl,
+            reason=reason_labels.get(reason, reason),
+            streak=_state["consecutive_wins"],
+        )
+    except Exception as _e:
+        logger.warning(f"Discord exit notification failed: {_e}")
+
     # Check kill switch after trade
     ks = risk.check_kill_switch(
         _state["consecutive_losses"],
@@ -361,6 +391,13 @@ def _close_position(reason: str, exit_price: float):
             "current_equity": _state["current_equity"],
         })
         _fire_traderspost("exit", 0)
+        try:
+            import discord_bot as _db
+            daily_loss = _state["daily_pnl"]
+            buffer = max(0.0, 1500 + daily_loss)
+            _db.post_kill_switch(daily_loss=daily_loss, buffer=buffer)
+        except Exception as _e:
+            logger.warning(f"Discord kill switch notification failed: {_e}")
 
 
 # ── APScheduler jobs ──────────────────────────────────────────────────────────
@@ -497,6 +534,17 @@ def five_min_bar_job():
         f"Stop={levels['stop']:.2f} | Target={levels['target']:.2f} | "
         f"Regime={regime}"
     )
+    try:
+        import discord_bot as _db
+        running_pnl = _state["current_equity"] - 100_000.0
+        _db.post_trade_entry(
+            price=levels["entry"],
+            stop=levels["stop"],
+            target=levels["target"],
+            running_pnl=running_pnl,
+        )
+    except Exception as _e:
+        logger.warning(f"Discord entry notification failed: {_e}")
 
 
 def update_status_job():
@@ -675,6 +723,54 @@ def noon_update_job():
         logger.error(f"Noon update job failed: {e}")
 
 
+def discord_summary_job():
+    """4:30 PM ET Mon-Fri: post daily summary to Discord with a Claude assessment."""
+    try:
+        import anthropic
+        import discord_bot as _db
+
+        today_trades = _state["daily_trades"]
+        wins = [t for t in today_trades if (t.get("pnl_dollars") or 0) > 0]
+        losses = [t for t in today_trades if (t.get("pnl_dollars") or 0) <= 0]
+        daily_pnl = _state["daily_pnl"]
+        total_pnl = _state["current_equity"] - 100_000.0
+        buffer = max(0.0, 1500 + daily_pnl)
+
+        assessment = "System ran as expected. Stay focused on the process."
+        try:
+            client = anthropic.Anthropic()
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=120,
+                system=_db.SABLE_SYSTEM,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Write exactly 2 sentences assessing today's trading session.\n"
+                        f"Trades: {len(today_trades)} | Wins: {len(wins)} | Losses: {len(losses)}\n"
+                        f"Daily P&L: ${daily_pnl:+.2f} | Eval total: ${total_pnl:.2f} / $3,000\n"
+                        f"Be honest and specific. End with one thing to focus on tomorrow."
+                    ),
+                }],
+            )
+            assessment = msg.content[0].text.strip()
+        except Exception as e:
+            logger.error(f"Claude daily assessment failed: {e}")
+
+        _db.post_daily_summary(
+            day_n=_state["session_day"],
+            trades=len(today_trades),
+            wins=len(wins),
+            losses=len(losses),
+            daily_pnl=daily_pnl,
+            total_pnl=total_pnl,
+            buffer=buffer,
+            assessment=assessment,
+        )
+    except Exception as e:
+        logger.error(f"discord_summary_job error: {e}")
+
+
 # ── Startup & shutdown ────────────────────────────────────────────────────────
 def _startup_catchup():
     """On boot: reconcile broker positions, then fire missed emails within a 45-min grace window."""
@@ -804,6 +900,15 @@ def main():
         id="end_of_day",
         name="End of Day",
         misfire_grace_time=14400,  # fire if within 4 hours of scheduled time
+    )
+
+    # Discord daily summary at 4:30 PM ET Mon-Fri (after market close)
+    _scheduler.add_job(
+        discord_summary_job,
+        CronTrigger(day_of_week="mon-fri", hour=16, minute=30),
+        id="discord_summary",
+        name="Discord Daily Summary",
+        misfire_grace_time=3600,
     )
 
     logger.info(
