@@ -132,23 +132,28 @@ async def _run_bot():
 
         feed_id = int(os.getenv("DISCORD_FEED_CHANNEL_ID", "0"))
         talk_id = int(os.getenv("DISCORD_TALK_CHANNEL_ID", "0"))
-        _feed_channel = _bot.get_channel(feed_id)
-        _talk_channel = _bot.get_channel(talk_id)
+
+        if feed_id:
+            try:
+                _feed_channel = await _bot.fetch_channel(feed_id)
+            except Exception as e:
+                logger.warning(f"Could not fetch #sable-feed (id={feed_id}): {e}")
+        else:
+            logger.warning("DISCORD_FEED_CHANNEL_ID not set")
+
+        if talk_id:
+            try:
+                _talk_channel = await _bot.fetch_channel(talk_id)
+            except Exception as e:
+                logger.warning(f"Could not fetch #talk-to-sable (id={talk_id}): {e}")
+        else:
+            logger.warning("DISCORD_TALK_CHANNEL_ID not set")
 
         logger.info(f"SABLE Discord bot online as {_bot.user}")
 
         if _feed_channel:
             await _feed_channel.send(
                 "🤖 **SABLE online.** Systems connected. Ready to trade."
-            )
-        else:
-            logger.warning(
-                "DISCORD_FEED_CHANNEL_ID not resolved — check the channel ID env var"
-            )
-
-        if not _talk_channel:
-            logger.warning(
-                "DISCORD_TALK_CHANNEL_ID not resolved — check the channel ID env var"
             )
 
     token = os.getenv("DISCORD_BOT_TOKEN", "")
