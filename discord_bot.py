@@ -71,17 +71,18 @@ def set_state_getter(fn):
 
 
 def _build_context() -> str:
-    """Build a plain-English context block from live trader state."""
+    """Build a plain-English context block from live trader state + DB diagnostics."""
     from datetime import date, timedelta
+    from worker.db import get_today_near_misses, get_risk_log, get_recent_trades
 
     if _state_getter is None:
         return ""
 
     state = _state_getter()
-    eval_pnl   = state["current_equity"] - 100_000.0
-    daily_pnl  = state["daily_pnl"]
+    eval_pnl    = state["current_equity"] - 100_000.0
+    daily_pnl   = state["daily_pnl"]
     session_day = state["session_day"]
-    streak     = state.get("consecutive_wins", 0)
+    streak      = state.get("consecutive_wins", 0)
 
     # Projected pass date based on current daily pace
     projected_pass = projected_payout = "TBD"
@@ -93,7 +94,7 @@ def _build_context() -> str:
             projected_payout = (date.today() + timedelta(days=days_left + 14)).strftime("%B %d")
 
     today_trades = state.get("daily_trades", [])
-    wins = sum(1 for t in today_trades if (t.get("pnl_dollars") or 0) > 0)
+    wins  = sum(1 for t in today_trades if (t.get("pnl_dollars") or 0) > 0)
     trade_line = f"{len(today_trades)} trades ({wins}W {len(today_trades)-wins}L)" if today_trades else "0 trades"
 
     pos = state.get("current_position")
@@ -101,6 +102,36 @@ def _build_context() -> str:
         f"In position: {pos['qty']} contracts @ ${pos['entry']:.2f}"
         if pos else "No open position"
     )
+
+    # Near-miss summary — why did bars not trigger today?
+    near_miss_summary = "No bar data yet"
+    try:
+        nm_rows = get_today_near_misses()
+        if nm_rows:
+            from collections import Counter
+            reasons = Counter(r.get("blocked_reason", "unknown") for r in nm_rows)
+            near_miss_summary = (
+                f"{len(nm_rows)} bars evaluated — "
+                + ", ".join(f"{v}x {k}" for k, v in reasons.most_common())
+            )
+            last = nm_rows[0]
+            if last.get("close") and last.get("breakout_level"):
+                pct = last.get("percent_to_breakout", 0) or 0
+                near_miss_summary += f"\nLast bar: SPY ${last['close']:.2f}, {abs(pct):.2f}% {'below' if pct < 0 else 'above'} breakout"
+    except Exception:
+        pass
+
+    # Recent trades (last 5)
+    recent_trade_lines = "None yet"
+    try:
+        recent = get_recent_trades(n=5)
+        if recent:
+            recent_trade_lines = "\n".join(
+                f"  {t.get('exit_reason','?')} ${t.get('pnl_dollars',0):+.2f} @ {t.get('exit_price','?')}"
+                for t in recent
+            )
+    except Exception:
+        pass
 
     return (
         f"Current eval P&L: ${eval_pnl:+.2f} / $3,000\n"
@@ -111,7 +142,9 @@ def _build_context() -> str:
         f"Position: {position_line}\n"
         f"Projected pass date: {projected_pass}\n"
         f"Projected first payout: {projected_payout}\n"
-        f"Projected $10K/month: October 2026"
+        f"Projected $10K/month: October 2026\n"
+        f"\nToday's signal activity:\n{near_miss_summary}\n"
+        f"\nRecent trades:\n{recent_trade_lines}"
     )
 
 

@@ -385,7 +385,7 @@ async def get_last_signal():
     return row
 
 
-@app.get("/api/near-misses", dependencies=[Depends(verify_auth)])
+@app.get("/api/near-misses")
 async def get_near_misses(limit: int = Query(default=20, ge=1, le=100)):
     """Recent near-miss signals (bars close to triggering but blocked)."""
     return get_recent_near_misses(n=limit)
