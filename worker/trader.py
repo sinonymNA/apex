@@ -703,6 +703,17 @@ def morning_brief_job():
             breakout_level=breakout_level,
             atr=atr,
         )
+        try:
+            import discord_bot as _db
+            _db.post_morning_brief(
+                session_day=_state["session_day"],
+                regime=regime,
+                spy_price=spy_price,
+                breakout_level=breakout_level,
+                atr=atr,
+            )
+        except Exception as _e:
+            logger.warning(f"Discord morning brief failed: {_e}")
     except Exception as e:
         logger.error(f"Morning brief job failed: {e}")
 
@@ -726,6 +737,18 @@ def noon_update_job():
             in_position=_state["current_position"] is not None,
             near_misses_am=near_misses_am,
         )
+        try:
+            import discord_bot as _db
+            _db.post_noon_update(
+                session_day=_state["session_day"],
+                daily_pnl=_state["daily_pnl"],
+                trade_count=_state["trade_count"],
+                regime=_state["regime"],
+                spy_price=spy_price,
+                in_position=_state["current_position"] is not None,
+            )
+        except Exception as _e:
+            logger.warning(f"Discord noon update failed: {_e}")
     except Exception as e:
         logger.error(f"Noon update job failed: {e}")
 

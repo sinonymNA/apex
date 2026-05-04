@@ -197,6 +197,32 @@ def post_kill_switch(daily_loss: float, buffer: float):
     )
 
 
+def post_morning_brief(session_day: int, regime: str, spy_price: float,
+                       breakout_level: float, atr: float):
+    pct_to_breakout = ((breakout_level - spy_price) / spy_price) * 100
+    _post_feed(
+        f"🌅 **MORNING BRIEF — Day {session_day}**\n"
+        f" SPY: ${spy_price:.2f}\n"
+        f" Breakout level: ${breakout_level:.2f} (+{pct_to_breakout:.1f}%)\n"
+        f" ATR: ${atr:.2f}\n"
+        f" Regime: {regime}\n"
+        f" Entry window opens 9:30 AM ET"
+    )
+
+
+def post_noon_update(session_day: int, daily_pnl: float, trade_count: int,
+                     regime: str, spy_price: float, in_position: bool):
+    position_line = "📍 In position" if in_position else "⏳ No position"
+    _post_feed(
+        f"☀️ **NOON UPDATE — Day {session_day}**\n"
+        f" SPY: ${spy_price:.2f}\n"
+        f" P&L today: ${daily_pnl:+.2f}\n"
+        f" Trades: {trade_count}\n"
+        f" Regime: {regime}\n"
+        f" {position_line}"
+    )
+
+
 def check_milestones(eval_pnl: float):
     """Called after every trade close — fires any newly crossed eval milestones."""
     from worker.db import is_milestone_fired, mark_milestone_fired
@@ -254,16 +280,16 @@ async def _analyze_news(headline: str) -> str:
         msg = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
-            system=SABLE_SYSTEM + "\nYou are in analyst mode.",
+            system=SABLE_SYSTEM,
             messages=[{
                 "role": "user",
                 "content": (
                     f"News: {headline}\n\n"
-                    "Write exactly 3 sentences:\n"
+                    "Explain this in 3 sentences:\n"
                     "1. What happened in plain English\n"
-                    "2. How it affects ES momentum trading today\n"
-                    "3. What Ethan should expect from his system\n"
-                    "Be specific. End with what to watch."
+                    "2. Why it matters (market-related or not)\n"
+                    "3. One thing to keep an eye on\n"
+                    "Be direct. No jargon."
                 ),
             }],
         )
@@ -312,8 +338,6 @@ async def _fetch_and_post_news():
             if not headline or not url:
                 continue
 
-            if not any(kw in headline.lower() for kw in NEWS_KEYWORDS):
-                continue
             if is_news_url_posted(url):
                 continue
 
