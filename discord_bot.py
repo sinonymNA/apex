@@ -14,6 +14,16 @@ import discord
 from loguru import logger
 
 # ── SABLE personality (injected into every Claude prompt) ─────────────────────
+NEWS_RSS_URL = (
+    "https://feeds.finance.yahoo.com/rss/2.0/headline"
+    "?s=SPY&region=US&lang=en-US"
+)
+NEWS_KEYWORDS = {
+    "fed", "federal reserve", "iran", "inflation", "jobs", "gdp",
+    "s&p 500", "s&p500", "recession", "rally", "crash", "oil",
+    "rates", "interest rate", "earnings", "unemployment", "cpi", "pce",
+}
+
 SABLE_SYSTEM = """You are SABLE — Ethan Sinon's personal trading assistant, market analyst, and hype man.
 
 His situation:
@@ -195,6 +205,103 @@ def post_daily_summary(
     )
 
 
+# ── News feed ─────────────────────────────────────────────────────────────────
+async def _analyze_news(headline: str) -> str:
+    import anthropic
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+    try:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        msg = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=SABLE_SYSTEM + "\nYou are in analyst mode.",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"News: {headline}\n\n"
+                    "Write exactly 3 sentences:\n"
+                    "1. What happened in plain English\n"
+                    "2. How it affects ES momentum trading today\n"
+                    "3. What Ethan should expect from his system\n"
+                    "Be specific. End with what to watch."
+                ),
+            }],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"News analysis failed: {e}")
+        return ""
+
+
+async def _fetch_and_post_news():
+    import httpx
+    import pytz
+    from xml.etree.ElementTree import fromstring
+    from worker.db import get_today_news_count, is_news_url_posted, mark_news_url_posted
+
+    ET_tz = pytz.timezone("America/New_York")
+    now_et = __import__("datetime").datetime.now(ET_tz)
+
+    if now_et.weekday() >= 5 or not (9 <= now_et.hour < 17):
+        return
+    if get_today_news_count() >= 6:
+        return
+    if _feed_channel is None:
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                NEWS_RSS_URL,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10.0,
+            )
+        if r.status_code != 200:
+            logger.warning(f"RSS fetch returned {r.status_code}")
+            return
+
+        root = fromstring(r.text)
+        for item in root.findall(".//item"):
+            title_el = item.find("title")
+            link_el  = item.find("link")
+            if title_el is None or link_el is None:
+                continue
+
+            headline = (title_el.text or "").strip()
+            url      = (link_el.text or "").strip()
+            if not headline or not url:
+                continue
+
+            if not any(kw in headline.lower() for kw in NEWS_KEYWORDS):
+                continue
+            if is_news_url_posted(url):
+                continue
+
+            analysis = await _analyze_news(headline)
+            ts = now_et.strftime("%-I:%M %p ET")
+            body = f"📰 **{headline}**"
+            if analysis:
+                body += f"\n{analysis}"
+            body += f"\n_{ts}_"
+
+            await _feed_channel.send(body)
+            mark_news_url_posted(url, headline)
+            break  # one post per 20-min check
+
+    except Exception as e:
+        logger.error(f"News fetch/post failed: {e}")
+
+
+async def _news_loop():
+    await _bot.wait_until_ready()
+    while not _bot.is_closed():
+        await _fetch_and_post_news()
+        await asyncio.sleep(20 * 60)
+
+
 # ── Bot internals ─────────────────────────────────────────────────────────────
 async def _run_bot():
     global _bot, _feed_channel, _talk_channel
@@ -232,6 +339,8 @@ async def _run_bot():
             await _feed_channel.send(
                 "🤖 **SABLE online.** Systems connected. Ready to trade."
             )
+
+        asyncio.create_task(_news_loop())
 
     @_bot.event
     async def on_message(message):

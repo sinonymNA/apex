@@ -197,6 +197,14 @@ class NearMissSignal(Base):
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}
 
 
+class NewsPost(Base):
+    __tablename__ = "news_posts"
+    id        = Column(Integer, primary_key=True, autoincrement=True)
+    url       = Column(String, unique=True, nullable=False)
+    headline  = Column(Text, nullable=False)
+    posted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 def init_db():
     """Create all tables if they don't exist. Also runs additive column migrations."""
@@ -447,6 +455,26 @@ def get_today_near_misses() -> list:
             .all()
         )
         return [r.to_dict() for r in rows]
+
+
+def is_news_url_posted(url: str) -> bool:
+    with Session(engine) as session:
+        return session.query(NewsPost).filter(NewsPost.url == url).first() is not None
+
+
+def mark_news_url_posted(url: str, headline: str):
+    with Session(engine) as session:
+        session.add(NewsPost(url=url, headline=headline))
+        session.commit()
+
+
+def get_today_news_count() -> int:
+    from sqlalchemy import cast, Date as SADate
+    today = date.today()
+    with Session(engine) as session:
+        return session.query(NewsPost).filter(
+            cast(NewsPost.posted_at, SADate) == today
+        ).count()
 
 
 def get_revenue_summary() -> dict:
