@@ -34,7 +34,10 @@ from models.regime_classifier import RegimeClassifier
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 ET = pytz.timezone("America/New_York")
-SYMBOL = "SPY"
+SYMBOL = "SPY"           # Alpaca paper account symbol (proxy tracking only)
+ES_DATA_SYMBOL = "ES=F"  # yfinance symbol for signal generation and monitoring
+ES_POINT_VALUE = 50.0    # USD per point for E-mini S&P 500
+ES_CONTRACTS = 1         # number of ES contracts per trade
 PAPER = True
 SESSION_START = time(9, 25)
 SESSION_END = time(16, 5)
@@ -142,15 +145,46 @@ def _fetch_bars_yfinance() -> "pd.DataFrame | None":
         return None
 
 
+def _fetch_es_bars_yfinance() -> "pd.DataFrame | None":
+    """Fetch 5-min ES=F bars from yfinance, filtered to regular trading hours."""
+    import pandas as pd
+    try:
+        df = yf.download(ES_DATA_SYMBOL, period="5d", interval="5m",
+                         auto_adjust=True, progress=False)
+        if df.empty:
+            return None
+        if hasattr(df.columns, "levels"):
+            for _lvl in range(df.columns.nlevels):
+                _candidate = df.columns.get_level_values(_lvl)
+                if "Close" in _candidate:
+                    df.columns = _candidate
+                    break
+        df = df.dropna(subset=["Close", "Volume"])
+        df = df[df["Volume"] > 0]
+        # Restrict to regular trading hours so overnight bars don't skew rolling highs
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df.index = df.index.tz_convert("America/New_York")
+        df = df.between_time("09:30", "16:00")
+        return df if len(df) >= 30 else None
+    except Exception as e:
+        logger.warning(f"ES=F yfinance fetch failed: {e}")
+        return None
+
+
 def _fetch_bars():
-    """Fetch recent SPY 5-minute bars. Tries Alpaca first, falls back to yfinance."""
+    """Fetch recent 5-min bars for signal generation. ES=F primary, SPY fallback."""
+    df = _fetch_es_bars_yfinance()
+    if df is not None:
+        return df
+    logger.warning("ES=F data unavailable — falling back to SPY data")
     df = _fetch_bars_alpaca()
     if df is not None:
         return df
-    logger.warning("Alpaca data unavailable — trying yfinance fallback")
+    logger.warning("Alpaca SPY data unavailable — trying yfinance SPY fallback")
     df = _fetch_bars_yfinance()
     if df is None:
-        logger.error("Both Alpaca and yfinance data sources failed")
+        logger.error("All data sources failed (ES=F, Alpaca SPY, yfinance SPY)")
     return df
 
 
@@ -309,7 +343,7 @@ def _log_near_miss_safe(nm: dict, regime: str, blocked_reason: str, trades_today
     try:
         db.log_near_miss({
             "timestamp":           datetime.now(timezone.utc),
-            "symbol":              SYMBOL,  # TODO SPY→ES: update SYMBOL constant
+            "symbol":              ES_DATA_SYMBOL,
             "close":               nm.get("close"),
             "breakout_level":      nm.get("breakout_level"),
             "percent_to_breakout": nm.get("percent_to_breakout"),
@@ -332,11 +366,12 @@ def _close_position(reason: str, exit_price: float):
 
     entry_price = pos["entry"]
     stop_price = pos["stop"]
-    qty = pos["qty"]
+    qty = pos["qty"]  # number of ES contracts
 
-    pnl_dollars = (exit_price - entry_price) * qty
+    # ES=F: each point move = ES_POINT_VALUE dollars per contract
+    pnl_dollars = (exit_price - entry_price) * qty * ES_POINT_VALUE
     atr = pos.get("atr", 0)
-    risk_amount = abs(entry_price - stop_price) * qty
+    risk_amount = abs(entry_price - stop_price) * qty * ES_POINT_VALUE
     pnl_r = pnl_dollars / risk_amount if risk_amount > 0 else 0.0
 
     # Update state
@@ -354,7 +389,7 @@ def _close_position(reason: str, exit_price: float):
     trade_data = {
         "entry_time": pos.get("entry_time"),
         "exit_time": datetime.now(timezone.utc),
-        "symbol": SYMBOL,
+        "symbol": ES_DATA_SYMBOL,
         "direction": "LONG",
         "entry_price": entry_price,
         "exit_price": exit_price,
@@ -578,7 +613,7 @@ def five_min_bar_job():
         "entry": levels["entry"],
         "stop": levels["stop"],
         "target": levels["target"],
-        "qty": risk.MAX_CONTRACTS,
+        "qty": ES_CONTRACTS,  # ES contracts; matches TradersPost contracts=1
         "atr": signal["atr"],
         "volume_ratio": signal.get("volume_ratio", 0),
         "order_id": order.get("id"),

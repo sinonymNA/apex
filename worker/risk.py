@@ -11,7 +11,7 @@ import pytz
 # ── Hardcoded constants — DO NOT OVERRIDE AT RUNTIME ─────────────────────────
 MAX_DAILY_LOSS = -1500          # Stop trading for the day if daily P&L hits this
 TRAILING_DD_LIMIT = -2800       # Kill switch if drawdown from peak exceeds this
-MAX_CONTRACTS = 2               # Maximum position size (shares for SPY paper phase)
+MAX_CONTRACTS = 1               # SPY paper account proxy shares (real size controlled by ES_CONTRACTS)
 MAX_TRADES_PER_DAY = 3          # Hard cap on trades per session
 NEWS_BLACKOUT_PRE_MIN = 5       # Minutes before known news event to block entry
 NEWS_BLACKOUT_POST_MIN = 8      # Minutes after known news event to block entry
