@@ -173,18 +173,17 @@ def _fetch_es_bars_yfinance() -> "pd.DataFrame | None":
 
 
 def _fetch_bars():
-    """Fetch recent 5-min bars for signal generation. ES=F primary, SPY fallback."""
-    df = _fetch_es_bars_yfinance()
-    if df is not None:
-        return df
-    logger.warning("ES=F data unavailable — falling back to SPY data")
+    """Fetch recent 5-min SPY bars for signal generation (Alpaca primary, yfinance fallback).
+    ES=F bar data is unavailable on Railway; ES price is captured separately at entry/exit
+    via _get_es_bid_ask() for accurate P&L calculation.
+    """
     df = _fetch_bars_alpaca()
     if df is not None:
         return df
-    logger.warning("Alpaca SPY data unavailable — trying yfinance SPY fallback")
+    logger.warning("Alpaca data unavailable — trying yfinance SPY fallback")
     df = _fetch_bars_yfinance()
     if df is None:
-        logger.error("All data sources failed (ES=F, Alpaca SPY, yfinance SPY)")
+        logger.error("Both Alpaca and yfinance SPY data sources failed")
     return df
 
 
@@ -343,7 +342,7 @@ def _log_near_miss_safe(nm: dict, regime: str, blocked_reason: str, trades_today
     try:
         db.log_near_miss({
             "timestamp":           datetime.now(timezone.utc),
-            "symbol":              ES_DATA_SYMBOL,
+            "symbol":              SYMBOL,
             "close":               nm.get("close"),
             "breakout_level":      nm.get("breakout_level"),
             "percent_to_breakout": nm.get("percent_to_breakout"),
@@ -364,14 +363,26 @@ def _close_position(reason: str, exit_price: float):
     if pos is None:
         return
 
-    entry_price = pos["entry"]
+    entry_price = pos["entry"]   # SPY price (used for stop/target monitoring)
     stop_price = pos["stop"]
-    qty = pos["qty"]  # number of ES contracts
+    qty = pos["qty"]             # ES contracts
 
-    # ES=F: each point move = ES_POINT_VALUE dollars per contract
-    pnl_dollars = (exit_price - entry_price) * qty * ES_POINT_VALUE
+    # P&L in real ES dollars.
+    # ES entry price was captured at order time via _get_es_bid_ask(); ES exit is fetched now.
+    # Both fall back to SPY*10 when ES=F is unavailable (e.g. Railway network restriction).
+    es_entry = pos.get("es_entry", 0.0)
+    _, es_exit = _get_es_bid_ask()  # ask side as proxy for exit fill
+    if es_entry > 0 and es_exit > 0:
+        pnl_dollars = (es_exit - es_entry) * qty * ES_POINT_VALUE
+        # Scale the SPY-derived stop distance into ES dollar risk
+        spy_risk_pct = abs(entry_price - stop_price) / entry_price if entry_price > 0 else 0.0
+        risk_amount = es_entry * spy_risk_pct * qty * ES_POINT_VALUE
+    else:
+        logger.warning("ES price unavailable at close — P&L approximated from SPY data")
+        pnl_dollars = (exit_price - entry_price) * qty * ES_POINT_VALUE
+        risk_amount = abs(entry_price - stop_price) * qty * ES_POINT_VALUE
+    risk_amount = risk_amount if risk_amount > 0 else 1.0  # prevent divide-by-zero
     atr = pos.get("atr", 0)
-    risk_amount = abs(entry_price - stop_price) * qty * ES_POINT_VALUE
     pnl_r = pnl_dollars / risk_amount if risk_amount > 0 else 0.0
 
     # Update state
@@ -610,13 +621,14 @@ def five_min_bar_job():
     levels = _strategy.get_levels(signal["price"], signal["atr"])
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
-        "entry": levels["entry"],
+        "entry": levels["entry"],     # SPY price — used for stop/target monitoring
         "stop": levels["stop"],
         "target": levels["target"],
-        "qty": ES_CONTRACTS,  # ES contracts; matches TradersPost contracts=1
+        "qty": ES_CONTRACTS,          # 1 ES contract; matches TradersPost
         "atr": signal["atr"],
         "volume_ratio": signal.get("volume_ratio", 0),
         "order_id": order.get("id"),
+        "es_entry": _es_bid if _es_bid > 0 else 0.0,  # ES price for P&L calculation
     }
     logger.info(
         f"Position opened: {SYMBOL} @ {levels['entry']:.2f} | "
