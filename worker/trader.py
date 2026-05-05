@@ -2,7 +2,7 @@
 worker/trader.py — Main trading worker for Sable Stocks.
 
 Runs Monday-Friday 9:25 AM - 4:05 PM ET using APScheduler.
-Fetches SPY bars from Alpaca (yfinance fallback), runs MomentumBreakout strategy,
+Fetches SPY bars from Alpaca (yfinance fallback), runs VWAPTrendPullback strategy,
 checks regime and risk, places paper orders via Alpaca, and logs everything.
 
 Deploy as a Railway worker process. Handles SIGTERM gracefully.
@@ -27,17 +27,20 @@ load_dotenv()
 
 # Internal imports (after load_dotenv so DATABASE_URL is set)
 from worker import db, risk
-from worker.strategy import MomentumBreakout
+from worker.strategy import VWAPTrendPullback
 from worker.email_report import send_daily_report, send_morning_brief, send_noon_update
 from diagnostics.analyzer import analyze_anomaly
 from models.regime_classifier import RegimeClassifier
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 ET = pytz.timezone("America/New_York")
-SYMBOL = "SPY"           # Alpaca paper account symbol (proxy tracking only)
-ES_DATA_SYMBOL = "ES=F"  # yfinance symbol for signal generation and monitoring
-ES_POINT_VALUE = 50.0    # USD per point for E-mini S&P 500
-ES_CONTRACTS = 1         # number of ES contracts per trade
+SYMBOL = "SPY"              # Alpaca paper account symbol (proxy tracking only)
+ES_DATA_SYMBOL = "ES=F"    # yfinance symbol for ES monitoring
+ES_POINT_VALUE = 50.0      # USD per point for E-mini S&P 500
+MES_POINT_VALUE = 5.0      # USD per point for Micro E-mini S&P 500
+MES_MAX_CONTRACTS = 5      # max MES contracts per trade
+ES_CONTRACTS = 1           # ES contracts cap (MES sizing handled per-signal)
+TRADERSPOST_TICKER = "MESM2026"  # MES June 2026 front month
 PAPER = True
 SESSION_START = time(9, 25)
 SESSION_END = time(16, 5)
@@ -60,7 +63,7 @@ _state = {
 
 # Lazy-initialized Alpaca client (not created until first use)
 _trading_client = None
-_strategy = MomentumBreakout()
+_strategy = VWAPTrendPullback()
 _classifier = RegimeClassifier()
 _scheduler = None
 
@@ -236,7 +239,7 @@ async def send_traderspost_signal(action: str, contracts: int = 1,
         return
 
     payload = {
-        "ticker": "ESM2026",
+        "ticker": TRADERSPOST_TICKER,
         "action": action,
         "contracts": contracts,
     }
@@ -402,15 +405,18 @@ def _place_sell_order(qty: int) -> bool:
 def _log_near_miss_safe(nm: dict, regime: str, blocked_reason: str, trades_today: int):
     """Write a near-miss record to DB. Never raises — silently logs errors."""
     try:
+        close = nm.get("close")
+        vwap = nm.get("vwap")
+        pct = ((close - vwap) / vwap * 100) if (close and vwap) else None
         db.log_near_miss({
             "timestamp":           datetime.now(timezone.utc),
-            "symbol":              SYMBOL,
-            "close":               nm.get("close"),
-            "breakout_level":      nm.get("breakout_level"),
-            "percent_to_breakout": nm.get("percent_to_breakout"),
-            "volume":              nm.get("volume"),
-            "required_volume":     nm.get("required_volume"),
-            "volume_ratio":        nm.get("volume_ratio"),
+            "symbol":              TRADERSPOST_TICKER,
+            "close":               close,
+            "breakout_level":      nm.get("or_high") or vwap,  # OR high as breakout reference
+            "percent_to_breakout": pct,
+            "volume":              nm.get("ema9"),              # repurpose field for EMA9
+            "required_volume":     nm.get("ema21"),             # repurpose field for EMA21
+            "volume_ratio":        nm.get("vwap_crossings", 0),
             "regime":              regime,
             "blocked_reason":      blocked_reason,
             "trades_today":        trades_today,
@@ -425,25 +431,32 @@ def _close_position(reason: str, exit_price: float):
     if pos is None:
         return
 
-    entry_price = pos["entry"]   # SPY price (used for stop/target monitoring)
+    direction = pos.get("direction", "LONG")
+    entry_price = pos["entry"]   # SPY price used for stop/target monitoring
     stop_price = pos["stop"]
-    qty = pos["qty"]             # ES contracts
+    qty = pos["qty"]             # MES contracts
 
-    # P&L in real ES dollars.
-    # ES entry price was captured at order time via _get_es_bid_ask(); ES exit is fetched now.
-    # Both fall back to SPY*10 when ES=F is unavailable (e.g. Railway network restriction).
+    # P&L in MES dollars ($5/point, SPY×10 = ES proxy).
     es_entry = pos.get("es_entry", 0.0)
-    _, es_exit = _get_es_bid_ask()  # ask side as proxy for exit fill
-    if es_entry > 0 and es_exit > 0:
-        pnl_dollars = (es_exit - es_entry) * qty * ES_POINT_VALUE
-        # Scale the SPY-derived stop distance into ES dollar risk
-        spy_risk_pct = abs(entry_price - stop_price) / entry_price if entry_price > 0 else 0.0
-        risk_amount = es_entry * spy_risk_pct * qty * ES_POINT_VALUE
+    es_bid, es_ask = _get_es_bid_ask()
+
+    if es_entry > 0 and (es_bid > 0 or es_ask > 0):
+        # LONG exit: sell at bid; SHORT exit: buy at ask
+        if direction == "LONG":
+            es_exit = es_bid if es_bid > 0 else es_ask
+            pnl_dollars = (es_exit - es_entry) * qty * MES_POINT_VALUE
+        else:
+            es_exit = es_ask if es_ask > 0 else es_bid
+            pnl_dollars = (es_entry - es_exit) * qty * MES_POINT_VALUE
     else:
         logger.warning("ES price unavailable at close — P&L approximated from SPY data")
-        pnl_dollars = (exit_price - entry_price) * qty * ES_POINT_VALUE
-        risk_amount = abs(entry_price - stop_price) * qty * ES_POINT_VALUE
-    risk_amount = risk_amount if risk_amount > 0 else 1.0  # prevent divide-by-zero
+        spy_move = exit_price - entry_price
+        if direction == "SHORT":
+            spy_move = -spy_move
+        pnl_dollars = spy_move * 10 * qty * MES_POINT_VALUE
+
+    stop_dist = pos.get("stop_distance", abs(entry_price - stop_price))
+    risk_amount = max(stop_dist * 10 * qty * MES_POINT_VALUE, 1.0)
     atr = pos.get("atr", 0)
     pnl_r = pnl_dollars / risk_amount if risk_amount > 0 else 0.0
 
@@ -462,8 +475,8 @@ def _close_position(reason: str, exit_price: float):
     trade_data = {
         "entry_time": pos.get("entry_time"),
         "exit_time": datetime.now(timezone.utc),
-        "symbol": ES_DATA_SYMBOL,
-        "direction": "LONG",
+        "symbol": TRADERSPOST_TICKER,
+        "direction": direction,
         "entry_price": entry_price,
         "exit_price": exit_price,
         "stop_price": stop_price,
@@ -472,7 +485,7 @@ def _close_position(reason: str, exit_price: float):
         "pnl_dollars": pnl_dollars,
         "pnl_r": pnl_r,
         "atr_at_entry": atr,
-        "volume_ratio": pos.get("volume_ratio", 0),
+        "volume_ratio": pos.get("stop_distance", 0),
         "exit_reason": reason,
         "regime": _state["regime"],
         "consecutive_losses": _state["consecutive_losses"],
@@ -487,17 +500,24 @@ def _close_position(reason: str, exit_price: float):
         f"Consecutive losses: {_state['consecutive_losses']}"
     )
 
-    # Place sell order (fire-and-forget — position may already be closed by stop)
-    _place_sell_order(qty)
+    # Close Alpaca paper position (LONG only — SHORT not tracked in Alpaca SPY account)
+    if direction == "LONG":
+        _place_sell_order(qty)
+
+    # Fire TradersPost exit
+    _es_bid2, _es_ask2 = _get_es_bid_ask()
     if reason == "end_of_day":
         _fire_traderspost("exit", 0)
-    else:
-        _, _es_ask = _get_es_bid_ask()
-        _es_limit_sell = round(_es_ask - 0.25, 2) if _es_ask > 0 else 0.0
+    elif direction == "LONG":
+        _es_limit_sell = round(_es_ask2 - 0.25, 2) if _es_ask2 > 0 else 0.0
         if _es_limit_sell > 0:
             _fire_traderspost_exit_with_fallback(_es_limit_sell)
         else:
-            _fire_traderspost("sell", 1)
+            _fire_traderspost("sell", qty)
+    else:
+        # SHORT exit: buy back at limit (bid + 0.25)
+        _es_limit_buy = round(_es_bid2 + 0.25, 2) if _es_bid2 > 0 else 0.0
+        _fire_traderspost("buy", qty, "limit" if _es_limit_buy > 0 else "market", _es_limit_buy)
 
     # Discord trade exit notification
     try:
@@ -575,8 +595,8 @@ def five_min_bar_job():
     if df is None or len(df) < 30:
         logger.warning("Insufficient data — skipping bar")
         _log_near_miss_safe(
-            {"close": None, "breakout_level": None, "percent_to_breakout": None,
-             "volume": None, "required_volume": None, "volume_ratio": None},
+            {"close": None, "vwap": None, "ema9": None, "ema21": None,
+             "or_high": None, "or_low": None, "vwap_crossings": 0},
             _state["regime"], "data_unavailable", _state["trade_count"],
         )
         return
@@ -587,8 +607,8 @@ def five_min_bar_job():
     except Exception as e:
         logger.error(f"compute_indicators error: {e}")
         _log_near_miss_safe(
-            {"close": None, "breakout_level": None, "percent_to_breakout": None,
-             "volume": None, "required_volume": None, "volume_ratio": None},
+            {"close": None, "vwap": None, "ema9": None, "ema21": None,
+             "or_high": None, "or_low": None, "vwap_crossings": 0},
             _state["regime"], "indicator_error", _state["trade_count"],
         )
         return
@@ -600,22 +620,27 @@ def five_min_bar_job():
         logger.error(f"evaluate_signal_state error: {e}")
         _nm = None
 
-    # ── Monitor open position ─────────────────────────────────────────────────
+    # ── Monitor open position (directional) ──────────────────────────────────
     if _state["current_position"] is not None:
         pos = _state["current_position"]
         current_price = float(df["Close"].iloc[-1])
+        direction = pos.get("direction", "LONG")
 
-        # Check stop
-        if current_price <= pos["stop"]:
-            _close_position("stop_hit", current_price)
-            return
+        if direction == "LONG":
+            if current_price <= pos["stop"]:
+                _close_position("stop_hit", current_price)
+                return
+            if current_price >= pos["target"]:
+                _close_position("target_hit", current_price)
+                return
+        else:  # SHORT
+            if current_price >= pos["stop"]:
+                _close_position("stop_hit", current_price)
+                return
+            if current_price <= pos["target"]:
+                _close_position("target_hit", current_price)
+                return
 
-        # Check target
-        if current_price >= pos["target"]:
-            _close_position("target_hit", current_price)
-            return
-
-        # Check max hold (4 hours)
         entry_time = pos.get("entry_time")
         if entry_time:
             elapsed = (datetime.now(timezone.utc) - entry_time).total_seconds() / 60
@@ -623,7 +648,7 @@ def five_min_bar_job():
                 _close_position("max_hold_exceeded", current_price)
                 return
 
-        return  # Still holding, nothing to do
+        return  # Still holding
 
     # ── Regime check (logging only — does NOT block entries) ──────────────────
     # Classifier was trained on synthetic data and cannot be trusted to filter trades.
@@ -639,40 +664,46 @@ def five_min_bar_job():
         _state["regime"] = regime
 
     # ── Signal generation ─────────────────────────────────────────────────────
-    signal = _strategy.generate_signals(df, now_et, _state["trade_count"])
+    eval_pnl = _state["current_equity"] - 100_000.0
+    signal = _strategy.generate_signals(
+        df, now_et, _state["trade_count"],
+        daily_pnl=_state["daily_pnl"],
+        current_equity=_state["current_equity"],
+        peak_equity=_state["peak_equity"],
+    )
     if signal is None:
+        # Per-candle decision log
         if _nm:
-            t = now_et.time()
-            in_window = time(9, 30) <= t < time(15, 30)
-            breakout_ok = _nm.get("close", 0) > _nm.get("breakout_level", 0)
-            volume_ok   = _nm.get("volume_ratio", 0) >= 1.0   # ratio vs required
-            at_limit    = _state["trade_count"] >= risk.MAX_TRADES_PER_DAY
+            t_now = now_et.time()
+            in_window = time(9, 45) <= t_now < time(11, 30)
+            or_break = _nm.get("or_long_break") or _nm.get("or_short_break")
+            vwap_aligned = _nm.get("above_vwap") or not _nm.get("above_vwap", True)
+            ema_aligned = _nm.get("ema_bullish") is not None
+            chop = _nm.get("chop_blocked", False)
+            at_limit = _state["trade_count"] >= risk.MAX_TRADES_PER_DAY
 
             if not in_window:
                 _reason = "outside_time_window"
             elif at_limit:
                 _reason = "max_trades_reached"
-            elif breakout_ok and not volume_ok:
-                _reason = "volume_not_met"
+            elif chop:
+                _reason = "vwap_chop"
+            elif not or_break:
+                _reason = "no_or_breakout"
+            elif not (_nm.get("long_pullback_valid") or _nm.get("short_pullback_valid")):
+                _reason = "no_pullback_candle"
             else:
-                _reason = "breakout_not_met"
+                _reason = "confirmation_not_met"
 
-            # Near-miss detail log: any 2+ conditions met → worth surfacing
-            conditions_met = sum([in_window, breakout_ok, volume_ok, not at_limit])
-            if conditions_met >= 3:
-                close = _nm.get("close", 0)
-                high  = _nm.get("breakout_level", 0)
-                vol   = _nm.get("volume", 0)
-                req   = _nm.get("required_volume", 0)
+            if _nm.get("is_near_miss"):
                 logger.info(
                     f"NEAR MISS: {now_et.strftime('%H:%M:%S')} | "
-                    f"Breakout: {'YES' if breakout_ok else 'NO'} "
-                    f"(close={close:.2f}, 20bar_high={high:.2f}) | "
-                    f"Volume: {'YES' if volume_ok else 'NO'} "
-                    f"(vol={vol:.0f}, required={req:.0f}) | "
-                    f"Time window: {'YES' if in_window else 'NO'} | "
-                    f"Regime (disabled): {regime} | "
-                    f"Missing: {_reason}"
+                    f"SPY={_nm.get('close', 0):.2f} VWAP={_nm.get('vwap', 0):.2f} | "
+                    f"EMA9={_nm.get('ema9', 0):.2f} EMA21={_nm.get('ema21', 0):.2f} | "
+                    f"OR_H={_nm.get('or_high') or 'none'} OR_L={_nm.get('or_low') or 'none'} | "
+                    f"AboveVWAP={_nm.get('above_vwap')} EMABull={_nm.get('ema_bullish')} | "
+                    f"LongPB={_nm.get('long_pullback_valid')} ShortPB={_nm.get('short_pullback_valid')} | "
+                    f"Chop={_nm.get('vwap_crossings', 0)}x | Missing: {_reason}"
                 )
             _log_near_miss_safe(_nm, regime, _reason, _state["trade_count"])
         return
@@ -683,6 +714,7 @@ def five_min_bar_job():
         trade_count=_state["trade_count"],
         time_et=now_et,
         consecutive_losses=_state["consecutive_losses"],
+        eval_pnl=eval_pnl,
     )
     result_str = "APPROVED" if risk_result["approved"] else "BLOCKED"
     db.log_risk_check("pre_trade", result_str, risk_result["reason"])
@@ -693,52 +725,67 @@ def five_min_bar_job():
             _log_near_miss_safe(_nm, _state["regime"], "risk_blocked", _state["trade_count"])
         return
 
-    # ── Signal fired log ─────────────────────────────────────────────────────
-    _nm_log = _strategy.evaluate_signal_state(df) or {}
+    # ── Signal fired log (12 decision fields) ────────────────────────────────
+    direction = signal["direction"]
     logger.info(
-        f"SIGNAL FIRED: {now_et.strftime('%H:%M:%S')} | "
-        f"SPY close: {signal['price']:.2f} | "
-        f"20-bar high: {_nm_log.get('breakout_level', 0):.2f} | "
-        f"Volume: {_nm_log.get('volume', 0):.0f} "
-        f"({signal.get('volume_ratio', 0):.2f}x avg) | "
-        f"ATR raw={signal.get('raw_atr', signal['atr']):.4f} "
-        f"effective={signal['atr']:.4f} | "
-        f"Regime classifier said: {regime} | "
-        f"Sending to TradersPost..."
+        f"SIGNAL FIRED [{direction}]: {now_et.strftime('%H:%M:%S')} | "
+        f"SPY={signal['price']:.2f} | "
+        f"OR={signal['or_high']:.2f}/{signal['or_low']:.2f} | "
+        f"VWAP={signal['vwap']:.2f} EMA9={signal['ema9']:.2f} EMA21={signal['ema21']:.2f} | "
+        f"ATR={signal['atr']:.4f}(raw={signal['raw_atr']:.4f}) | "
+        f"PB_H={signal['pullback_high']:.2f} PB_L={signal['pullback_low']:.2f} | "
+        f"Stop={signal['stop']:.2f} Target={signal['target']:.2f} "
+        f"Dist={signal['stop_distance']:.4f} | "
+        f"Phase={signal['phase']} MaxRisk=${signal['max_risk']:.0f} "
+        f"Actual=${signal['risk_actual']:.0f} | "
+        f"Contracts={signal['contracts']} MES | "
+        f"VWAPx={signal['vwap_crossings']} | "
+        f"Regime={regime}"
     )
 
-    # ── Place order ───────────────────────────────────────────────────────────
-    order = _place_buy_order(signal)
-    if order is None:
-        return
-    _es_bid, _ = _get_es_bid_ask()
-    _es_limit_buy = round(_es_bid + 0.25, 2) if _es_bid > 0 else 0.0
-    _fire_traderspost("buy", 1, "limit" if _es_limit_buy > 0 else "market", _es_limit_buy)
+    # ── Place entry order ─────────────────────────────────────────────────────
+    _es_bid, _es_ask = _get_es_bid_ask()
 
-    levels = _strategy.get_levels(signal["price"], signal["atr"])
+    if direction == "LONG":
+        order = _place_buy_order(signal)
+        if order is None:
+            return
+        _es_entry_price = _es_bid if _es_bid > 0 else _es_ask
+        _limit_price = round(_es_bid + 0.25, 2) if _es_bid > 0 else 0.0
+        _fire_traderspost("buy", signal["contracts"],
+                          "limit" if _limit_price > 0 else "market", _limit_price)
+    else:
+        # SHORT: skip Alpaca paper order (SPY short tracking unreliable); use TradersPost only
+        order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
+        _es_entry_price = _es_ask if _es_ask > 0 else _es_bid
+        _limit_price = round(_es_ask - 0.25, 2) if _es_ask > 0 else 0.0
+        _fire_traderspost("sell", signal["contracts"],
+                          "limit" if _limit_price > 0 else "market", _limit_price)
+
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
-        "entry": levels["entry"],     # SPY price — used for stop/target monitoring
-        "stop": levels["stop"],
-        "target": levels["target"],
-        "qty": ES_CONTRACTS,          # 1 ES contract; matches TradersPost
+        "direction": direction,
+        "entry": signal["price"],       # SPY price — used for stop/target monitoring
+        "stop": signal["stop"],
+        "target": signal["target"],
+        "qty": signal["contracts"],     # MES contracts
         "atr": signal["atr"],
-        "volume_ratio": signal.get("volume_ratio", 0),
+        "stop_distance": signal["stop_distance"],
         "order_id": order.get("id"),
-        "es_entry": _es_bid if _es_bid > 0 else 0.0,  # ES price for P&L calculation
+        "es_entry": _es_entry_price,    # ES proxy price for P&L calculation
     }
     logger.info(
-        f"Position opened: {SYMBOL} @ {levels['entry']:.2f} | "
-        f"Stop={levels['stop']:.2f} | Target={levels['target']:.2f} | "
-        f"Regime={regime}"
+        f"Position opened [{direction}]: {SYMBOL} @ {signal['price']:.2f} | "
+        f"Stop={signal['stop']:.2f} | Target={signal['target']:.2f} | "
+        f"Contracts={signal['contracts']} MES | ES_entry={_es_entry_price:.2f}"
     )
     try:
         import discord_bot as _db
         running_pnl = _state["current_equity"] - 100_000.0
         _db.post_trade_entry(
-            price=levels["entry"],
-            stop=levels["stop"],
-            target=levels["target"],
+            price=signal["price"],
+            stop=signal["stop"],
+            target=signal["target"],
             running_pnl=running_pnl,
         )
     except Exception as _e:
@@ -878,13 +925,13 @@ def morning_brief_job():
         regime = _classifier.classify(df_ind)
         _state["regime"] = regime
 
-        valid = df_ind.dropna(subset=["high_20", "atr14"])
+        valid = df_ind.dropna(subset=["vwap", "atr14"])
         if valid.empty:
             logger.warning("Morning brief: no valid indicator rows")
             return
         last          = valid.iloc[-1]
         spy_price     = float(last["Close"])
-        breakout_level = float(last["high_20"])
+        breakout_level = float(last["vwap"])   # VWAP as the morning reference level
         atr           = float(last["atr14"])
 
         send_morning_brief(
@@ -957,7 +1004,7 @@ def regime_log_job():
         _state["regime"] = regime
         would_block = regime in ("Range-Bound", "Extreme Volatility")
 
-        valid = df.dropna(subset=["atr14"])
+        valid = df.dropna(subset=["atr14", "vwap"])
         atr = float(valid["atr14"].iloc[-1]) if not valid.empty else 0.0
 
         # Simple ADX proxy: ratio of directional move to ATR over last 14 bars

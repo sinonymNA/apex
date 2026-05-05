@@ -9,13 +9,13 @@ from datetime import datetime, time
 import pytz
 
 # ── Hardcoded constants — DO NOT OVERRIDE AT RUNTIME ─────────────────────────
-MAX_DAILY_LOSS = -1500          # Stop trading for the day if daily P&L hits this
-TRAILING_DD_LIMIT = -2800       # Kill switch if drawdown from peak exceeds this
-MAX_CONTRACTS = 1               # SPY paper account proxy shares (real size controlled by ES_CONTRACTS)
-MAX_TRADES_PER_DAY = 3          # Hard cap on trades per session
+MAX_DAILY_LOSS = -500           # Phase 1 default; overridden by get_phase_limits() per trade
+TRAILING_DD_LIMIT = -2000       # Kill switch if drawdown from peak exceeds this
+MAX_CONTRACTS = 1               # SPY paper account proxy shares (real size controlled by MES contracts)
+MAX_TRADES_PER_DAY = 2          # Hard cap on trades per session
 NEWS_BLACKOUT_PRE_MIN = 5       # Minutes before known news event to block entry
 NEWS_BLACKOUT_POST_MIN = 8      # Minutes after known news event to block entry
-KILL_CONSECUTIVE_LOSSES = 3     # Pause if this many losses in a row
+KILL_CONSECUTIVE_LOSSES = 2     # Pause if this many losses in a row
 
 ET = pytz.timezone("America/New_York")
 
@@ -32,6 +32,21 @@ _RECURRING_HIGH_IMPACT = [
     # FOMC — no fixed schedule; operator should pause manually
     # Market open volatility — always block before 10:00 AM (handled by time window)
 ]
+
+
+def get_phase_limits(eval_pnl: float) -> dict:
+    """
+    Return risk limits for the current eval phase based on cumulative P&L.
+
+    Returns:
+        {"phase": int, "max_risk": float, "daily_loss": float, "daily_profit_target": float}
+    """
+    if eval_pnl >= 2200:
+        return {"phase": 3, "max_risk": 150.0, "daily_loss": -300.0, "daily_profit_target": 300.0}
+    elif eval_pnl >= 1000:
+        return {"phase": 2, "max_risk": 200.0, "daily_loss": -400.0, "daily_profit_target": 400.0}
+    else:
+        return {"phase": 1, "max_risk": 250.0, "daily_loss": -500.0, "daily_profit_target": 500.0}
 
 
 def _in_news_blackout(time_et: datetime) -> tuple[bool, str]:
@@ -67,23 +82,27 @@ def pre_trade_check(
     trade_count: int,
     time_et: datetime,
     consecutive_losses: int,
+    eval_pnl: float = 0.0,
 ) -> dict:
     """
     Run all pre-trade risk checks in priority order.
     Returns the first failing check.
 
     Args:
-        daily_pnl: Cumulative P&L for the session (negative = loss)
+        daily_pnl: Today's session P&L (negative = loss)
         trade_count: Number of completed trades today
         time_et: Current datetime in ET timezone
         consecutive_losses: Number of consecutive losing trades
+        eval_pnl: Cumulative eval P&L (used for phase-based daily limit)
 
     Returns:
         {"approved": bool, "reason": str}
     """
-    # 1. Daily loss limit
-    if daily_pnl <= MAX_DAILY_LOSS:
-        return {"approved": False, "reason": f"Daily loss limit reached (${daily_pnl:.0f} <= ${MAX_DAILY_LOSS})"}
+    # 1. Phase-based daily loss limit
+    phase_limits = get_phase_limits(eval_pnl)
+    daily_limit = phase_limits["daily_loss"]
+    if daily_pnl <= daily_limit:
+        return {"approved": False, "reason": f"Daily loss limit reached (${daily_pnl:.0f} <= ${daily_limit:.0f}, Phase {phase_limits['phase']})"}
 
     # 2. Max trades per day
     if trade_count >= MAX_TRADES_PER_DAY:
