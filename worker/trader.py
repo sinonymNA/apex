@@ -45,6 +45,19 @@ PAPER = True
 SESSION_START = time(9, 25)
 SESSION_END = time(16, 5)
 
+# ── Safety configuration (override via environment variables) ──────────────────
+# MARKET_DATA_MODE: "PROXY" = SPY×10 surrogate | "FUTURES_DIRECT" = live MES/ES data
+MARKET_DATA_MODE: str = os.getenv("MARKET_DATA_MODE", "PROXY")
+# ALLOW_PROXY_TRADING: must be explicitly "true" to send real/eval orders in PROXY mode
+ALLOW_PROXY_TRADING: bool = os.getenv("ALLOW_PROXY_TRADING", "false").lower() == "true"
+# DRY_RUN: defaults true when PROXY+!allowProxyTrading; no orders sent when true
+_dry_run_default = "true" if (MARKET_DATA_MODE == "PROXY" and not ALLOW_PROXY_TRADING) else "false"
+DRY_RUN: bool = os.getenv("DRY_RUN", _dry_run_default).lower() == "true"
+# ALLOW_SHORTS: shorts are disabled until TradersPost short-side execution is confirmed
+ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "false").lower() == "true"
+# LONG_ONLY: additional guard — skip all short entries regardless of ALLOW_SHORTS
+LONG_ONLY: bool = os.getenv("LONG_ONLY", "true").lower() == "true"
+
 # ── Global mutable state ──────────────────────────────────────────────────────
 _state = {
     "daily_pnl": 0.0,
@@ -228,17 +241,53 @@ def _fetch_bars():
     return df
 
 
-async def send_traderspost_signal(action: str, contracts: int = 1,
-                                   order_type: str = "market", limit_price: float = 0.0):
-    """Send trading signal to TradersPost/Tradovate."""
+def _is_order_allowed() -> tuple[bool, str]:
+    """
+    Check whether real/eval orders may be sent.
+
+    Returns (True, "OK") or (False, reason_string).
+    Called before every TradersPost signal dispatch.
+    """
+    if DRY_RUN:
+        return False, "DRY_RUN mode active — no orders sent"
+    if MARKET_DATA_MODE == "PROXY" and not ALLOW_PROXY_TRADING:
+        return False, (
+            "Proxy market data mode blocks real orders "
+            "(set ALLOW_PROXY_TRADING=true to override)"
+        )
+    return True, "OK"
+
+
+async def send_traderspost_signal(
+    action: str,
+    contracts: int = 1,
+    order_type: str = "market",
+    limit_price: float = 0.0,
+    intent: str = "",
+):
+    """
+    Send trading signal to TradersPost/Tradovate.
+
+    intent values: open_long | close_long | open_short | close_short | close_all
+    Included as a payload field so the webhook log clearly identifies the trade side.
+    TradersPost ignores unknown fields so this is safe.
+    """
     import httpx
+
+    # Safety gate — block proxy-mode real orders
+    allowed, gate_reason = _is_order_allowed()
+    if not allowed:
+        logger.info(
+            f"TradersPost signal SKIPPED [{intent or action}]: {gate_reason}"
+        )
+        return
 
     webhook_url = os.getenv("TRADERSPOST_WEBHOOK_URL")
     if not webhook_url:
         logger.warning("TRADERSPOST_WEBHOOK_URL not set, skipping")
         return
 
-    payload = {
+    payload: dict = {
         "ticker": TRADERSPOST_TICKER,
         "action": action,
         "contracts": contracts,
@@ -246,18 +295,16 @@ async def send_traderspost_signal(action: str, contracts: int = 1,
     if order_type == "limit" and limit_price > 0:
         payload["orderType"] = "limit"
         payload["limitPrice"] = limit_price
+    if intent:
+        payload["intent"] = intent   # informational; ignored by TP if unsupported
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                webhook_url,
-                json=payload,
-                timeout=5.0,
-            )
+            response = await client.post(webhook_url, json=payload, timeout=5.0)
             logger.info(
-                f"TradersPost signal sent: {action} | "
-                f"Status: {response.status_code} | "
-                f"Response: {response.text}"
+                f"TradersPost signal sent [{intent or action}] | "
+                f"action={action} contracts={contracts} | "
+                f"Status: {response.status_code} | Response: {response.text}"
             )
     except Exception as e:
         logger.error(f"TradersPost signal failed: {e}")
@@ -303,30 +350,34 @@ def _get_es_bid_ask() -> tuple:
     return 0.0, 0.0
 
 
-def _fire_traderspost(action: str, contracts: int = 1,
-                      order_type: str = "market", limit_price: float = 0.0):
+def _fire_traderspost(
+    action: str,
+    contracts: int = 1,
+    order_type: str = "market",
+    limit_price: float = 0.0,
+    intent: str = "",
+):
     """Non-blocking sync wrapper — spawns a daemon thread to run the async signal."""
     import asyncio
     import threading
 
     threading.Thread(
         target=lambda: asyncio.run(
-            send_traderspost_signal(action, contracts, order_type, limit_price)
+            send_traderspost_signal(action, contracts, order_type, limit_price, intent)
         ),
         daemon=True,
     ).start()
 
 
-def _fire_traderspost_exit_with_fallback(limit_price: float):
+def _fire_traderspost_exit_with_fallback(limit_price: float, intent: str = "close_long"):
     """Limit sell immediately, then market exit after 30 s if limit didn't fill."""
     import threading, time
 
-    _fire_traderspost("sell", 1, "limit", limit_price)
+    _fire_traderspost("sell", 1, "limit", limit_price, intent)
 
     def _fallback():
         time.sleep(30)
-        # Fire market exit — Tradeify ignores it if already flat, closes if still open
-        _fire_traderspost("exit", 0, "market")
+        _fire_traderspost("exit", 0, "market", 0.0, intent)
         logger.info("TradersPost 30s fallback: market exit sent")
 
     threading.Thread(target=_fallback, daemon=True).start()
@@ -504,20 +555,21 @@ def _close_position(reason: str, exit_price: float):
     if direction == "LONG":
         _place_sell_order(qty)
 
-    # Fire TradersPost exit
+    # Fire TradersPost exit with explicit intent labels
     _es_bid2, _es_ask2 = _get_es_bid_ask()
     if reason == "end_of_day":
-        _fire_traderspost("exit", 0)
+        _fire_traderspost("exit", 0, intent="close_all")
     elif direction == "LONG":
         _es_limit_sell = round(_es_ask2 - 0.25, 2) if _es_ask2 > 0 else 0.0
         if _es_limit_sell > 0:
-            _fire_traderspost_exit_with_fallback(_es_limit_sell)
+            _fire_traderspost_exit_with_fallback(_es_limit_sell, intent="close_long")
         else:
-            _fire_traderspost("sell", qty)
+            _fire_traderspost("sell", qty, intent="close_long")
     else:
         # SHORT exit: buy back at limit (bid + 0.25)
         _es_limit_buy = round(_es_bid2 + 0.25, 2) if _es_bid2 > 0 else 0.0
-        _fire_traderspost("buy", qty, "limit" if _es_limit_buy > 0 else "market", _es_limit_buy)
+        _fire_traderspost("buy", qty, "limit" if _es_limit_buy > 0 else "market",
+                          _es_limit_buy, intent="close_short")
 
     # Discord trade exit notification
     try:
@@ -570,7 +622,7 @@ def _close_position(reason: str, exit_price: float):
             "consecutive_losses": _state["consecutive_losses"],
             "current_equity": _state["current_equity"],
         })
-        _fire_traderspost("exit", 0)
+        _fire_traderspost("exit", 0, intent="close_all")
         try:
             import discord_bot as _db
             daily_loss = _state["daily_pnl"]
@@ -725,8 +777,22 @@ def five_min_bar_job():
             _log_near_miss_safe(_nm, _state["regime"], "risk_blocked", _state["trade_count"])
         return
 
-    # ── Signal fired log (12 decision fields) ────────────────────────────────
+    # ── Short direction guard ─────────────────────────────────────────────────
     direction = signal["direction"]
+    if direction == "SHORT" and (LONG_ONLY or not ALLOW_SHORTS):
+        if LONG_ONLY:
+            logger.info(
+                f"SHORT signal at {now_et.strftime('%H:%M:%S')} skipped: "
+                f"long-only mode active (LONG_ONLY=true)"
+            )
+        else:
+            logger.info(
+                f"SHORT signal at {now_et.strftime('%H:%M:%S')} skipped: "
+                f"shorts disabled by config (ALLOW_SHORTS=false)"
+            )
+        return
+
+    # ── Signal fired log (12 decision fields) ────────────────────────────────
     logger.info(
         f"SIGNAL FIRED [{direction}]: {now_et.strftime('%H:%M:%S')} | "
         f"SPY={signal['price']:.2f} | "
@@ -753,14 +819,16 @@ def five_min_bar_job():
         _es_entry_price = _es_bid if _es_bid > 0 else _es_ask
         _limit_price = round(_es_bid + 0.25, 2) if _es_bid > 0 else 0.0
         _fire_traderspost("buy", signal["contracts"],
-                          "limit" if _limit_price > 0 else "market", _limit_price)
+                          "limit" if _limit_price > 0 else "market",
+                          _limit_price, intent="open_long")
     else:
         # SHORT: skip Alpaca paper order (SPY short tracking unreliable); use TradersPost only
         order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
         _es_entry_price = _es_ask if _es_ask > 0 else _es_bid
         _limit_price = round(_es_ask - 0.25, 2) if _es_ask > 0 else 0.0
         _fire_traderspost("sell", signal["contracts"],
-                          "limit" if _limit_price > 0 else "market", _limit_price)
+                          "limit" if _limit_price > 0 else "market",
+                          _limit_price, intent="open_short")
 
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
@@ -847,7 +915,7 @@ def end_of_day_job():
                     f"EOD close: found {len(positions)} open positions, closing all"
                 )
                 client.close_all_positions(cancel_orders=True)
-                _fire_traderspost("exit", 0)
+                _fire_traderspost("exit", 0, intent="close_all")
             else:
                 logger.info("EOD close: no open positions at Alpaca")
         except Exception as e:
@@ -1147,23 +1215,52 @@ def main():
     logger.info("Sable Stocks worker starting...")
 
     # ── Data pipeline smoke test ──────────────────────────────────────────────
+    _data_ok = False
+    _data_detail = "no data"
     try:
         _test_df = _fetch_bars_1min_alpaca()
         if _test_df is not None and len(_test_df) >= 30:
-            logger.info(
-                f"Data pipeline OK — Alpaca 1-min SPY bars: {len(_test_df)} rows, "
-                f"last close: ${float(_test_df['Close'].iloc[-1]):.2f}"
+            _data_ok = True
+            _data_detail = (
+                f"{len(_test_df)} bars, last close ${float(_test_df['Close'].iloc[-1]):.2f}"
             )
         else:
-            logger.warning("Alpaca 1-min data returned no bars — will retry on first bar tick")
+            _data_detail = "0 bars returned — will retry on first tick"
     except Exception as _e:
-        logger.warning(f"Startup data check failed: {_e}")
+        _data_detail = f"fetch failed: {_e}"
 
     _es_bid, _es_ask = _get_es_bid_ask()
-    if _es_bid > 0:
-        logger.info(f"ES price OK — bid/ask: {_es_bid:.2f}/{_es_ask:.2f} (SPY×10 proxy)")
-    else:
-        logger.warning("ES price unavailable at startup — will retry on each trade")
+    _es_detail = (
+        f"bid={_es_bid:.2f} / ask={_es_ask:.2f} (SPY×10 proxy)"
+        if _es_bid > 0 else "unavailable — will retry on each trade"
+    )
+
+    # ── Premarket readiness log ───────────────────────────────────────────────
+    _order_allowed, _order_reason = _is_order_allowed()
+    _order_status = "ENABLED" if _order_allowed else f"BLOCKED — {_order_reason}"
+    logger.info("=" * 55)
+    logger.info("  SABLE TRADING SYSTEM — PREMARKET READINESS")
+    logger.info(f"  {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')} ET")
+    logger.info("=" * 55)
+    logger.info(f"  Instrument:          {TRADERSPOST_TICKER} (MES ${MES_POINT_VALUE:.0f}/point)")
+    logger.info(f"  Data source:         SPY 1-min Alpaca bars (×10 proxy)")
+    logger.info(f"  marketDataMode:      {MARKET_DATA_MODE}")
+    logger.info(f"  allowProxyTrading:   {str(ALLOW_PROXY_TRADING).lower()}")
+    logger.info(f"  dryRun:              {str(DRY_RUN).lower()}")
+    logger.info(f"  allowShorts:         {str(ALLOW_SHORTS).lower()}")
+    logger.info(f"  longOnly:            {str(LONG_ONLY).lower()}")
+    logger.info("  " + "-" * 51)
+    logger.info(f"  Real/eval orders:    {_order_status}")
+    logger.info("  " + "-" * 51)
+    logger.info(f"  Data pipeline:       {'OK — ' + _data_detail if _data_ok else 'WARN — ' + _data_detail}")
+    logger.info(f"  ES price:            {_es_detail}")
+    logger.info("=" * 55)
+    if MARKET_DATA_MODE == "PROXY":
+        logger.warning(
+            "WARNING: Using SPY×10 proxy for MES pricing. "
+            "Signals may not match actual futures candles. "
+            "Real/eval orders disabled unless ALLOW_PROXY_TRADING=true."
+        )
 
     _startup_catchup()
 
