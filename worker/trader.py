@@ -882,7 +882,7 @@ def main():
     # Every 5 minutes during session hours (Mon-Fri)
     _scheduler.add_job(
         five_min_bar_job,
-        CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*/5"),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour="9-16", minute="*/5"),
         id="five_min_bar",
         name="5-Minute Bar Job",
         misfire_grace_time=60,
@@ -899,7 +899,7 @@ def main():
     # Market open reset at 9:25 AM ET Mon-Fri
     _scheduler.add_job(
         market_open_job,
-        CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=9, minute=25),
         id="market_open",
         name="Market Open Reset",
     )
@@ -907,7 +907,7 @@ def main():
     # Morning brief email at 9:25 AM ET Mon-Fri
     _scheduler.add_job(
         morning_brief_job,
-        CronTrigger(day_of_week="mon-fri", hour=9, minute=25),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=9, minute=25),
         id="morning_brief",
         name="Morning Brief Email",
         misfire_grace_time=7200,  # fire if within 2 hours of scheduled time
@@ -916,7 +916,7 @@ def main():
     # Noon update email at 12:00 PM ET Mon-Fri
     _scheduler.add_job(
         noon_update_job,
-        CronTrigger(day_of_week="mon-fri", hour=12, minute=0),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=12, minute=0),
         id="noon_update",
         name="Noon Update Email",
         misfire_grace_time=7200,
@@ -926,7 +926,7 @@ def main():
     # the DAY-order sell executes within the regular session.
     _scheduler.add_job(
         end_of_day_job,
-        CronTrigger(day_of_week="mon-fri", hour=15, minute=55),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=15, minute=55),
         id="end_of_day",
         name="End of Day",
         misfire_grace_time=14400,  # fire if within 4 hours of scheduled time
@@ -935,7 +935,7 @@ def main():
     # Discord daily summary at 4:30 PM ET Mon-Fri (after market close)
     _scheduler.add_job(
         discord_summary_job,
-        CronTrigger(day_of_week="mon-fri", hour=16, minute=30),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=16, minute=30),
         id="discord_summary",
         name="Discord Daily Summary",
         misfire_grace_time=3600,
