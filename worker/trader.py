@@ -154,7 +154,8 @@ def _fetch_bars():
     return df
 
 
-async def send_traderspost_signal(action: str, contracts: int = 1):
+async def send_traderspost_signal(action: str, contracts: int = 1,
+                                   order_type: str = "market", limit_price: float = 0.0):
     """Send trading signal to TradersPost/Tradovate."""
     import httpx
 
@@ -168,6 +169,9 @@ async def send_traderspost_signal(action: str, contracts: int = 1):
         "action": action,
         "contracts": contracts,
     }
+    if order_type == "limit" and limit_price > 0:
+        payload["orderType"] = "limit"
+        payload["limitPrice"] = limit_price
 
     try:
         async with httpx.AsyncClient() as client:
@@ -185,15 +189,49 @@ async def send_traderspost_signal(action: str, contracts: int = 1):
         logger.error(f"TradersPost signal failed: {e}")
 
 
-def _fire_traderspost(action: str, contracts: int = 1):
+def _get_es_bid_ask() -> tuple:
+    """Return (bid, ask) for ES front month. Falls back to SPY*10 if data unavailable."""
+    try:
+        df = yf.download("ES=F", period="1d", interval="1m", progress=False, auto_adjust=True)
+        if not df.empty:
+            price = float(df["Close"].iloc[-1])
+            return price - 0.25, price + 0.25
+    except Exception:
+        pass
+    df = _fetch_bars()
+    if df is not None and not df.empty:
+        es = round(float(df["Close"].iloc[-1]) * 10, 2)
+        return es - 0.25, es + 0.25
+    return 0.0, 0.0
+
+
+def _fire_traderspost(action: str, contracts: int = 1,
+                      order_type: str = "market", limit_price: float = 0.0):
     """Non-blocking sync wrapper — spawns a daemon thread to run the async signal."""
     import asyncio
     import threading
 
     threading.Thread(
-        target=lambda: asyncio.run(send_traderspost_signal(action, contracts)),
+        target=lambda: asyncio.run(
+            send_traderspost_signal(action, contracts, order_type, limit_price)
+        ),
         daemon=True,
     ).start()
+
+
+def _fire_traderspost_exit_with_fallback(limit_price: float):
+    """Limit sell immediately, then market exit after 30 s if limit didn't fill."""
+    import threading, time
+
+    _fire_traderspost("sell", 1, "limit", limit_price)
+
+    def _fallback():
+        time.sleep(30)
+        # Fire market exit — Tradeify ignores it if already flat, closes if still open
+        _fire_traderspost("exit", 0, "market")
+        logger.info("TradersPost 30s fallback: market exit sent")
+
+    threading.Thread(target=_fallback, daemon=True).start()
 
 
 def _place_buy_order(signal: dict) -> dict | None:
@@ -343,8 +381,15 @@ def _close_position(reason: str, exit_price: float):
 
     # Place sell order (fire-and-forget — position may already be closed by stop)
     _place_sell_order(qty)
-    _fire_traderspost("exit" if reason == "end_of_day" else "sell",
-                      0 if reason == "end_of_day" else 1)
+    if reason == "end_of_day":
+        _fire_traderspost("exit", 0)
+    else:
+        _, _es_ask = _get_es_bid_ask()
+        _es_limit_sell = round(_es_ask - 0.25, 2) if _es_ask > 0 else 0.0
+        if _es_limit_sell > 0:
+            _fire_traderspost_exit_with_fallback(_es_limit_sell)
+        else:
+            _fire_traderspost("sell", 1)
 
     # Discord trade exit notification
     try:
@@ -523,7 +568,9 @@ def five_min_bar_job():
     order = _place_buy_order(signal)
     if order is None:
         return
-    _fire_traderspost("buy", 1)
+    _es_bid, _ = _get_es_bid_ask()
+    _es_limit_buy = round(_es_bid + 0.25, 2) if _es_bid > 0 else 0.0
+    _fire_traderspost("buy", 1, "limit" if _es_limit_buy > 0 else "market", _es_limit_buy)
 
     levels = _strategy.get_levels(signal["price"], signal["atr"])
     _state["current_position"] = {
