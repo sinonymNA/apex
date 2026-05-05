@@ -550,26 +550,32 @@ async def export_near_misses_csv():
 async def pipeline_test():
     """Run the full bar pipeline end-to-end and return verbose diagnostics."""
     import datetime as _dt
-    import yfinance as yf
+    from worker.trader import _fetch_bars, _fetch_bars_alpaca, _get_es_bid_ask
     from worker.strategy import MomentumBreakout
     from worker.db import log_near_miss, get_last_near_miss
 
     out = {}
 
-    # Step 1: yfinance fetch
+    # Step 1: Alpaca data fetch (primary signal source)
     try:
-        df = yf.download("SPY", period="2d", interval="5m", auto_adjust=True, progress=False)
-        raw_cols = list(df.columns)
-        out["step1_fetch"] = {"ok": True, "rows": len(df), "columns_raw": str(raw_cols)}
-
-        if hasattr(df.columns, "levels"):
-            for _lvl in range(df.columns.nlevels):
-                _cand = df.columns.get_level_values(_lvl)
-                if "Close" in _cand:
-                    df.columns = _cand
-                    break
-            out["step1_fetch"]["columns_after_fix"] = list(df.columns)
-        out["step1_fetch"]["last_close"] = float(df["Close"].iloc[-1]) if "Close" in df.columns else None
+        df = _fetch_bars_alpaca()
+        if df is not None and len(df) >= 30:
+            out["step1_fetch"] = {
+                "ok": True, "source": "Alpaca",
+                "rows": len(df),
+                "last_close": float(df["Close"].iloc[-1]),
+            }
+        else:
+            # Alpaca failed — try full fallback chain
+            df = _fetch_bars()
+            if df is not None:
+                out["step1_fetch"] = {
+                    "ok": True, "source": "yfinance_fallback",
+                    "rows": len(df),
+                    "last_close": float(df["Close"].iloc[-1]),
+                }
+            else:
+                return {"step1_fetch": {"ok": False, "error": "All data sources failed — check Alpaca API keys"}}
     except Exception as e:
         return {"step1_fetch": {"ok": False, "error": str(e)}}
 
@@ -609,6 +615,21 @@ async def pipeline_test():
         out["step4_db_write"] = {"ok": True, "last_reason": last.get("blocked_reason")}
     except Exception as e:
         out["step4_db_write"] = {"ok": False, "error": str(e)}
+
+    # Step 5: ES bid/ask (P&L pricing)
+    try:
+        bid, ask = _get_es_bid_ask()
+        out["step5_es_price"] = {
+            "ok": bid > 0,
+            "bid": bid, "ask": ask,
+            "note": "SPY×10 proxy" if bid > 0 and bid < 10000 else "direct ES=F",
+        }
+    except Exception as e:
+        out["step5_es_price"] = {"ok": False, "error": str(e)}
+
+    # Overall verdict
+    all_ok = all(v.get("ok", False) for v in out.values())
+    out["verdict"] = "READY TO TRADE" if all_ok else "PIPELINE HAS ISSUES — see steps above"
 
     return out
 

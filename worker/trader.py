@@ -223,7 +223,12 @@ async def send_traderspost_signal(action: str, contracts: int = 1,
 
 
 def _get_es_bid_ask() -> tuple:
-    """Return (bid, ask) for ES front month. Falls back to SPY*10 if data unavailable."""
+    """Return (bid, ask) for ES front month.
+    1. yfinance ES=F  (direct; often blocked on Railway)
+    2. Alpaca latest SPY bar × 10  (fast single-bar call)
+    3. Last bar from _fetch_bars() × 10  (full bars fallback)
+    """
+    # 1. yfinance ES=F
     try:
         df = yf.download("ES=F", period="1d", interval="1m", progress=False, auto_adjust=True)
         if not df.empty:
@@ -231,10 +236,29 @@ def _get_es_bid_ask() -> tuple:
             return price - 0.25, price + 0.25
     except Exception:
         pass
+
+    # 2. Alpaca latest bar for SPY — single fast API call
+    try:
+        api_key = os.getenv("ALPACA_API_KEY", "")
+        secret_key = os.getenv("ALPACA_SECRET_KEY", os.getenv("ALPACA_API_SECRET", ""))
+        if api_key and secret_key:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockLatestBarRequest
+            _data_client = StockHistoricalDataClient(api_key, secret_key)
+            req = StockLatestBarRequest(symbol_or_symbols=SYMBOL)
+            bars = _data_client.get_stock_latest_bar(req)
+            spy_price = float(bars[SYMBOL].close)
+            es = round(spy_price * 10, 2)
+            return es - 0.25, es + 0.25
+    except Exception as e:
+        logger.debug(f"Alpaca latest bar fallback failed: {e}")
+
+    # 3. Full bars fetch × 10
     df = _fetch_bars()
     if df is not None and not df.empty:
         es = round(float(df["Close"].iloc[-1]) * 10, 2)
         return es - 0.25, es + 0.25
+
     return 0.0, 0.0
 
 
@@ -969,6 +993,26 @@ def main():
         logger.info("Run `python backtest/run.py` to train and save the model")
 
     logger.info("Sable Stocks worker starting...")
+
+    # ── Data pipeline smoke test ──────────────────────────────────────────────
+    try:
+        _test_df = _fetch_bars_alpaca()
+        if _test_df is not None and len(_test_df) >= 30:
+            logger.info(
+                f"Data pipeline OK — Alpaca SPY bars: {len(_test_df)} rows, "
+                f"last close: ${float(_test_df['Close'].iloc[-1]):.2f}"
+            )
+        else:
+            logger.warning("Alpaca data returned no bars — will retry on first bar tick")
+    except Exception as _e:
+        logger.warning(f"Startup data check failed: {_e}")
+
+    _es_bid, _es_ask = _get_es_bid_ask()
+    if _es_bid > 0:
+        logger.info(f"ES price OK — bid/ask: {_es_bid:.2f}/{_es_ask:.2f} (SPY×10 proxy)")
+    else:
+        logger.warning("ES price unavailable at startup — will retry on each trade")
+
     _startup_catchup()
 
     _scheduler = BlockingScheduler(timezone="America/New_York")
