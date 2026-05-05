@@ -89,8 +89,44 @@ def _is_session_hours() -> bool:
     return SESSION_START <= t <= SESSION_END
 
 
+def _fetch_bars_1min_alpaca() -> "pd.DataFrame | None":
+    """Fetch 1-min SPY bars from Alpaca — primary signal source (proven gate setting)."""
+    import pandas as pd
+    api_key = os.getenv("ALPACA_API_KEY", "")
+    secret_key = os.getenv("ALPACA_SECRET_KEY", os.getenv("ALPACA_API_SECRET", ""))
+    if not api_key or not secret_key:
+        return None
+    try:
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from datetime import timedelta
+
+        client = StockHistoricalDataClient(api_key, secret_key)
+        # 2 hours of 1-min bars: plenty for 20-bar lookback + ATR14 warmup
+        start = datetime.now(timezone.utc) - timedelta(hours=2)
+        req = StockBarsRequest(
+            symbol_or_symbols=SYMBOL,
+            timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+            start=start,
+        )
+        bars = client.get_stock_bars(req)
+        df = bars.df
+        if df.empty:
+            return None
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.xs(SYMBOL, level="symbol")
+        df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
+                                 "close": "Close", "volume": "Volume"})
+        df = df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
+        return df if len(df) >= 30 else None
+    except Exception as e:
+        logger.warning(f"Alpaca 1-min data fetch failed: {e}")
+        return None
+
+
 def _fetch_bars_alpaca() -> "pd.DataFrame | None":
-    """Fetch 5-min SPY bars from Alpaca market data API (primary source)."""
+    """Fetch 5-min SPY bars from Alpaca — fallback if 1-min unavailable."""
     import pandas as pd
     api_key = os.getenv("ALPACA_API_KEY", "")
     secret_key = os.getenv("ALPACA_SECRET_KEY", os.getenv("ALPACA_API_SECRET", ""))
@@ -113,16 +149,14 @@ def _fetch_bars_alpaca() -> "pd.DataFrame | None":
         df = bars.df
         if df.empty:
             return None
-        # Strip symbol level from MultiIndex (symbol, timestamp) → timestamp index
         if isinstance(df.index, pd.MultiIndex):
             df = df.xs(SYMBOL, level="symbol")
-        # Alpaca returns lowercase; rename to standard uppercase OHLCV
         df = df.rename(columns={"open": "Open", "high": "High", "low": "Low",
                                  "close": "Close", "volume": "Volume"})
         df = df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
         return df if len(df) >= 30 else None
     except Exception as e:
-        logger.warning(f"Alpaca data fetch failed: {e}")
+        logger.warning(f"Alpaca 5-min data fetch failed: {e}")
         return None
 
 
@@ -173,17 +207,21 @@ def _fetch_es_bars_yfinance() -> "pd.DataFrame | None":
 
 
 def _fetch_bars():
-    """Fetch recent 5-min SPY bars for signal generation (Alpaca primary, yfinance fallback).
-    ES=F bar data is unavailable on Railway; ES price is captured separately at entry/exit
-    via _get_es_bid_ask() for accurate P&L calculation.
+    """Fetch SPY bars for signal generation.
+    Primary: 1-min bars from Alpaca (proven gate setting — 20-bar = 20-min window).
+    Fallback: 5-min bars from Alpaca, then yfinance.
     """
+    df = _fetch_bars_1min_alpaca()
+    if df is not None:
+        return df
+    logger.warning("Alpaca 1-min unavailable — falling back to 5-min bars")
     df = _fetch_bars_alpaca()
     if df is not None:
         return df
-    logger.warning("Alpaca data unavailable — trying yfinance SPY fallback")
+    logger.warning("Alpaca 5-min unavailable — trying yfinance fallback")
     df = _fetch_bars_yfinance()
     if df is None:
-        logger.error("Both Alpaca and yfinance SPY data sources failed")
+        logger.error("All data sources failed")
     return df
 
 
@@ -587,16 +625,14 @@ def five_min_bar_job():
 
         return  # Still holding, nothing to do
 
-    # ── Regime check ──────────────────────────────────────────────────────────
+    # ── Regime check (logging only — does NOT block entries) ──────────────────
+    # Classifier was trained on synthetic data and cannot be trusted to filter trades.
+    # It runs in the background so logs show what it would have called.
     try:
         regime = _classifier.classify(df)
         _state["regime"] = regime
-        if regime in ("Range-Bound", "Extreme Volatility"):
-            logger.debug(f"Regime {regime} — no entry")
-            db.log_risk_check("regime", "BLOCKED", f"Regime is {regime}")
-            if _nm:  # log every bar so Last Signal Check always has data
-                _log_near_miss_safe(_nm, regime, "regime_blocked", _state["trade_count"])
-            return
+        would_block = regime in ("Range-Bound", "Extreme Volatility")
+        db.log_risk_check("regime", "INFO", f"Regime={regime} | would_have_blocked={would_block}")
     except Exception as e:
         logger.error(f"Regime classification error: {e}")
         regime = "Weak Trend"
@@ -996,14 +1032,14 @@ def main():
 
     # ── Data pipeline smoke test ──────────────────────────────────────────────
     try:
-        _test_df = _fetch_bars_alpaca()
+        _test_df = _fetch_bars_1min_alpaca()
         if _test_df is not None and len(_test_df) >= 30:
             logger.info(
-                f"Data pipeline OK — Alpaca SPY bars: {len(_test_df)} rows, "
+                f"Data pipeline OK — Alpaca 1-min SPY bars: {len(_test_df)} rows, "
                 f"last close: ${float(_test_df['Close'].iloc[-1]):.2f}"
             )
         else:
-            logger.warning("Alpaca data returned no bars — will retry on first bar tick")
+            logger.warning("Alpaca 1-min data returned no bars — will retry on first bar tick")
     except Exception as _e:
         logger.warning(f"Startup data check failed: {_e}")
 
@@ -1017,13 +1053,13 @@ def main():
 
     _scheduler = BlockingScheduler(timezone="America/New_York")
 
-    # Every 5 minutes during session hours (Mon-Fri)
+    # Every 1 minute during session hours (Mon-Fri) — proven gate setting
     _scheduler.add_job(
         five_min_bar_job,
-        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour="9-16", minute="*/5"),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour="9-16", minute="*"),
         id="five_min_bar",
-        name="5-Minute Bar Job",
-        misfire_grace_time=60,
+        name="1-Minute Bar Job",
+        misfire_grace_time=30,
     )
 
     # Status update every 60 seconds

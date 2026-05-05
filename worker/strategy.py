@@ -26,21 +26,25 @@ class MomentumBreakout:
     Momentum breakout strategy with ATR-based stops and targets.
 
     Entry conditions (ALL must be true):
-      - Close > 10-bar rolling high (breakout above 50-min high)
-      - Volume >= 1.2x 10-bar average volume
+      - Close > 20-bar rolling high (breakout above 20-minute high on 1-min bars)
+      - Volume >= 1.5x 20-bar average volume
       - Time is between 9:30 AM and 3:30 PM ET
       - Trades today < MAX_TRADES_PER_DAY
 
-    Risk levels:
-      - Stop:   entry - (1.0 x ATR14)
-      - Target: entry + (2.0 x ATR14)
+    Risk levels (proven gate settings):
+      - Stop:   entry - clamp(ATR14, 0.10, 0.50) × 1.0
+      - Target: entry + clamp(ATR14, 0.10, 0.50) × 2.0  (always 2:1)
+      - ATR floor prevents stops < 0.10 SPY pts ($50 ES risk)
+      - ATR cap prevents stops > 0.50 SPY pts ($250 ES risk)
       - Max hold: 4 hours (240 minutes)
     """
 
-    LOOKBACK = 10
-    VOLUME_MULTIPLIER = 1.2
+    LOOKBACK = 20
+    VOLUME_MULTIPLIER = 1.5
     STOP_ATR = 1.0
     TARGET_ATR = 2.0
+    ATR_MIN = 0.10   # floor: prevents sub-$50 ES stops in dead markets
+    ATR_MAX = 0.50   # cap: prevents over-$250 ES stops in spike volatility
     MAX_HOLD_MINUTES = 240
     ENTRY_START = time(9, 30)
     ENTRY_END = time(15, 30)
@@ -147,13 +151,18 @@ class MomentumBreakout:
             return None
 
         # ATR must be positive
-        if last["atr14"] <= 0 or np.isnan(last["atr14"]):
+        raw_atr = float(last["atr14"])
+        if raw_atr <= 0 or np.isnan(raw_atr):
             return None
+
+        # Clamp ATR to proven guardrails: floor 0.10, cap 0.50 SPY points
+        effective_atr = max(self.ATR_MIN, min(self.ATR_MAX, raw_atr))
 
         return {
             "signal": "BUY",
             "price": float(last["Close"]),
-            "atr": float(last["atr14"]),
+            "atr": effective_atr,
+            "raw_atr": raw_atr,
             "volume_ratio": float(last["Volume"] / last["volume_avg"]) if last["volume_avg"] > 0 else 0.0,
         }
 
