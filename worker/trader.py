@@ -641,17 +641,40 @@ def five_min_bar_job():
     # ── Signal generation ─────────────────────────────────────────────────────
     signal = _strategy.generate_signals(df, now_et, _state["trade_count"])
     if signal is None:
-        if _nm:  # log every bar so Last Signal Check always has data
+        if _nm:
             t = now_et.time()
-            if not (time(9, 30) <= t < time(15, 30)):
+            in_window = time(9, 30) <= t < time(15, 30)
+            breakout_ok = _nm.get("close", 0) > _nm.get("breakout_level", 0)
+            volume_ok   = _nm.get("volume_ratio", 0) >= 1.0   # ratio vs required
+            at_limit    = _state["trade_count"] >= risk.MAX_TRADES_PER_DAY
+
+            if not in_window:
                 _reason = "outside_time_window"
-            elif _state["trade_count"] >= risk.MAX_TRADES_PER_DAY:
+            elif at_limit:
                 _reason = "max_trades_reached"
-            elif _nm.get("price_near_miss") and not _nm.get("volume_near_miss"):
+            elif breakout_ok and not volume_ok:
                 _reason = "volume_not_met"
             else:
                 _reason = "breakout_not_met"
-            _log_near_miss_safe(_nm, _state["regime"], _reason, _state["trade_count"])
+
+            # Near-miss detail log: any 2+ conditions met → worth surfacing
+            conditions_met = sum([in_window, breakout_ok, volume_ok, not at_limit])
+            if conditions_met >= 3:
+                close = _nm.get("close", 0)
+                high  = _nm.get("breakout_level", 0)
+                vol   = _nm.get("volume", 0)
+                req   = _nm.get("required_volume", 0)
+                logger.info(
+                    f"NEAR MISS: {now_et.strftime('%H:%M:%S')} | "
+                    f"Breakout: {'YES' if breakout_ok else 'NO'} "
+                    f"(close={close:.2f}, 20bar_high={high:.2f}) | "
+                    f"Volume: {'YES' if volume_ok else 'NO'} "
+                    f"(vol={vol:.0f}, required={req:.0f}) | "
+                    f"Time window: {'YES' if in_window else 'NO'} | "
+                    f"Regime (disabled): {regime} | "
+                    f"Missing: {_reason}"
+                )
+            _log_near_miss_safe(_nm, regime, _reason, _state["trade_count"])
         return
 
     # ── Risk check ────────────────────────────────────────────────────────────
@@ -669,6 +692,20 @@ def five_min_bar_job():
         if _nm:  # log every bar
             _log_near_miss_safe(_nm, _state["regime"], "risk_blocked", _state["trade_count"])
         return
+
+    # ── Signal fired log ─────────────────────────────────────────────────────
+    _nm_log = _strategy.evaluate_signal_state(df) or {}
+    logger.info(
+        f"SIGNAL FIRED: {now_et.strftime('%H:%M:%S')} | "
+        f"SPY close: {signal['price']:.2f} | "
+        f"20-bar high: {_nm_log.get('breakout_level', 0):.2f} | "
+        f"Volume: {_nm_log.get('volume', 0):.0f} "
+        f"({signal.get('volume_ratio', 0):.2f}x avg) | "
+        f"ATR raw={signal.get('raw_atr', signal['atr']):.4f} "
+        f"effective={signal['atr']:.4f} | "
+        f"Regime classifier said: {regime} | "
+        f"Sending to TradersPost..."
+    )
 
     # ── Place order ───────────────────────────────────────────────────────────
     order = _place_buy_order(signal)
@@ -907,6 +944,38 @@ def noon_update_job():
         logger.error(f"Noon update job failed: {e}")
 
 
+def regime_log_job():
+    """Every 30 minutes: log current regime status and whether it would have blocked a trade."""
+    if not _is_session_hours():
+        return
+    try:
+        df = _fetch_bars()
+        if df is None or len(df) < 30:
+            return
+        df = _strategy.compute_indicators(df)
+        regime = _classifier.classify(df)
+        _state["regime"] = regime
+        would_block = regime in ("Range-Bound", "Extreme Volatility")
+
+        valid = df.dropna(subset=["atr14"])
+        atr = float(valid["atr14"].iloc[-1]) if not valid.empty else 0.0
+
+        # Simple ADX proxy: ratio of directional move to ATR over last 14 bars
+        closes = df["Close"].tail(14)
+        net_move = abs(float(closes.iloc[-1]) - float(closes.iloc[0]))
+        adx_proxy = round(net_move / atr, 2) if atr > 0 else 0.0
+
+        logger.info(
+            f"REGIME CHECK: {_now_et().strftime('%H:%M')} | "
+            f"Current regime: {regime} | "
+            f"Would have blocked trade: {'YES' if would_block else 'NO'} | "
+            f"ATR: {atr:.4f} | "
+            f"ADX proxy: {adx_proxy}"
+        )
+    except Exception as e:
+        logger.warning(f"regime_log_job error: {e}")
+
+
 def discord_summary_job():
     """4:30 PM ET Mon-Fri: post daily summary to Discord with a Claude assessment."""
     try:
@@ -1104,6 +1173,14 @@ def main():
         id="end_of_day",
         name="End of Day",
         misfire_grace_time=14400,  # fire if within 4 hours of scheduled time
+    )
+
+    # Regime status log every 30 minutes during session (diagnostic — never blocks)
+    _scheduler.add_job(
+        regime_log_job,
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour="9-16", minute="*/30"),
+        id="regime_log",
+        name="Regime Log",
     )
 
     # Discord daily summary at 4:30 PM ET Mon-Fri (after market close)
