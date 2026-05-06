@@ -1,6 +1,7 @@
 .env
 *.parquet
 logs/*.json
+logs/*.jsonl
 logs/*.csv
 logs/*.db
 logs/*.log
