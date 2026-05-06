@@ -500,6 +500,7 @@ class AlpacaMarketData:
                     continue
 
                 no_key_notified = False
+                _stale_warned = getattr(self, "_stale_warned", False)
                 bars = await self._fetch_bars()
 
                 if not bars:
@@ -507,23 +508,41 @@ class AlpacaMarketData:
                     continue
 
                 latest_ts = bars[-1]["timestamp"]
-                _agent_state["status"] = "connected"
-                _agent_state["error"] = None
-                backoff = 10
-
                 latest_price = float(bars[-1]["close"])
+                backoff = 10
 
                 if latest_ts != self._last_ts:
                     self._buffer = bars
                     self._last_ts = latest_ts
+                    self._stale_warned = False
+                    _agent_state["status"] = "connected"
+                    _agent_state["error"] = None
                     _agent_state["last_candle_time"] = datetime.now(timezone.utc).isoformat()
 
                     # Pass all bars except the most recent (still building) as closed
                     closed = list(self._buffer[:-1])
                     if closed:
                         self._on_bar_closed(_ALPACA_PROXY_SYMBOL, closed)
+                else:
+                    # Same bar as last poll — check if the feed has gone stale
+                    last_seen = _agent_state.get("last_candle_time")
+                    if last_seen:
+                        stale_seconds = (
+                            datetime.now(timezone.utc)
+                            - datetime.fromisoformat(last_seen)
+                        ).total_seconds()
+                        if stale_seconds > 180 and not self._stale_warned:
+                            stale_msg = (
+                                f"⚠️ Mirror Agent: Alpaca IEX feed stale for "
+                                f"{int(stale_seconds // 60)}m — no new bars since "
+                                f"{latest_ts}. Bars may resume shortly."
+                            )
+                            logger.warning(stale_msg)
+                            send_error(stale_msg)
+                            self._stale_warned = True
+                            _agent_state["error"] = f"IEX feed stale {int(stale_seconds//60)}m"
 
-                # Heartbeat check on every poll, whether or not a new bar arrived
+                # Heartbeat / idle callback fires every poll regardless
                 if self._on_idle:
                     self._on_idle(latest_price)
 
