@@ -6,7 +6,10 @@ runs MirrorStrategy scoring on each closed bar, fires Discord alerts,
 and tracks paper simulation results.
 
 ALERT-ONLY: No live trades, no orders, no broker interaction whatsoever.
-If real futures data is unavailable, logs and alerts Discord — no SPY fallback.
+Data sources (in priority order):
+  1. Tradovate WebSocket — real CME futures bars (requires registered API app + CID/SEC)
+  2. Alpaca 1-min SPY bars — free proxy via existing Alpaca keys (auto-used when
+     TRADOVATE_USERNAME is blank or Tradovate auth fails permanently)
 """
 from __future__ import annotations
 
@@ -14,7 +17,8 @@ import asyncio
 import json
 import os
 import threading
-from datetime import datetime, timezone
+import time as _time_module
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 import httpx
@@ -73,6 +77,20 @@ _NO_DATA_MSG = (
     "permissions or connect another real futures data source."
 )
 
+# ── Alpaca fallback config ─────────────────────────────────────────────────────
+
+ALPACA_API_KEY: str = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY: str = os.getenv("ALPACA_SECRET_KEY", "")
+ALPACA_BASE_URL: str = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+_ALPACA_DATA_URL = "https://data.alpaca.markets"
+
+# Symbol used when Tradovate is unavailable — SPY ×10 ≈ ES/MES price proxy
+_ALPACA_PROXY_SYMBOL = "SPY"
+
+# Whether to use Alpaca as the data source
+# Auto-detected: True if TRADOVATE_USERNAME is blank
+_use_alpaca_fallback: bool = not bool(TRADOVATE_USERNAME)
+
 # ── Shared state (read by FastAPI health/stats endpoints) ──────────────────────
 
 _agent_state: dict = {
@@ -82,7 +100,11 @@ _agent_state: dict = {
     "last_candle_time": None,
     "last_alert_time": None,
     "alerts_today": 0,
-    "data_source": f"Tradovate {TRADOVATE_ENV} WebSocket",
+    "data_source": (
+        f"Alpaca 1-min SPY (proxy)"
+        if not TRADOVATE_USERNAME
+        else f"Tradovate {TRADOVATE_ENV} WebSocket"
+    ),
     "error": None,
 }
 
@@ -194,26 +216,38 @@ class TradovateMarketData:
         )
         return False
 
+    # Give up after this many consecutive auth failures and let MirrorAgent
+    # fall back to the Alpaca proxy if one is available.
+    _MAX_AUTH_FAILURES = 5
+
     async def run_forever(self) -> None:
         """Main reconnect loop — authenticates then runs the WebSocket session."""
         ws_url = _TV_WS_URL.get(TRADOVATE_ENV, _TV_WS_URL["demo"])
         backoff = 5
         _auth_error_notified = False  # send Discord error only once per agent start
+        _consecutive_auth_failures = 0
 
         while True:
             try:
                 if not self._token:
                     ok = await self.authenticate()
                     if not ok:
+                        _consecutive_auth_failures += 1
                         log_error(_NO_DATA_MSG)
                         _agent_state["status"] = "error"
                         _agent_state["error"] = "Authentication failed — check Tradovate credentials"
                         if not _auth_error_notified:
                             send_error(_NO_DATA_MSG)
                             _auth_error_notified = True
+                        if _consecutive_auth_failures >= self._MAX_AUTH_FAILURES and ALPACA_API_KEY:
+                            raise RuntimeError(
+                                f"Tradovate auth failed {_consecutive_auth_failures} times in a row — "
+                                "giving up and switching to Alpaca fallback"
+                            )
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, 300)
                         continue
+                    _consecutive_auth_failures = 0  # reset on success
 
                 _auth_error_notified = False  # reset on successful connect
 
@@ -383,6 +417,123 @@ class TradovateMarketData:
                     buf[-1] = new_candles[-1]
 
 
+# ── Alpaca 1-min bar poller (SPY proxy fallback) ───────────────────────────────
+
+class AlpacaMarketData:
+    """
+    Polls Alpaca's REST API for 1-minute SPY bars every 60 seconds.
+    Fires `on_bar_closed` with the symbol "SPY" and the last 100 closed bars
+    each time a new bar has appeared.
+
+    Used automatically when TRADOVATE_USERNAME is not configured, giving the
+    Mirror Agent a free data source via the existing Alpaca paper-trading keys.
+    """
+
+    _BARS_URL = f"{_ALPACA_DATA_URL}/v2/stocks/{{symbol}}/bars"
+
+    def __init__(
+        self,
+        on_bar_closed: Callable[[str, list[dict]], None],
+    ):
+        self._on_bar_closed = on_bar_closed
+        self._last_ts: Optional[str] = None
+        self._buffer: list[dict] = []
+
+    async def _fetch_bars(self) -> list[dict]:
+        """Fetch the last 100 1-minute bars for SPY from Alpaca."""
+        if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+            raise RuntimeError("ALPACA_API_KEY / ALPACA_SECRET_KEY not set")
+
+        url = self._BARS_URL.format(symbol=_ALPACA_PROXY_SYMBOL)
+        params = {
+            "timeframe": "1Min",
+            "limit": 100,
+            "feed": "iex",
+            "sort": "asc",
+        }
+        headers = {
+            "APCA-API-KEY-ID": ALPACA_API_KEY,
+            "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, params=params, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+        bars = data.get("bars") or []
+        return [
+            {
+                "open": float(b["o"]),
+                "high": float(b["h"]),
+                "low": float(b["l"]),
+                "close": float(b["c"]),
+                "timestamp": b["t"],
+            }
+            for b in bars
+        ]
+
+    async def run_forever(self) -> None:
+        """Poll Alpaca every ~60 seconds and fire on_bar_closed for each new bar."""
+        backoff = 10
+        no_key_notified = False
+
+        while True:
+            try:
+                if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+                    if not no_key_notified:
+                        msg = (
+                            "Mirror Agent: no data source configured. "
+                            "Set TRADOVATE_USERNAME (futures) or ensure ALPACA_API_KEY is set (SPY proxy)."
+                        )
+                        log_error(msg)
+                        send_error(msg)
+                        no_key_notified = True
+                        _agent_state["status"] = "error"
+                        _agent_state["error"] = "No data source configured"
+                    await asyncio.sleep(60)
+                    continue
+
+                no_key_notified = False
+                bars = await self._fetch_bars()
+
+                if not bars:
+                    await asyncio.sleep(30)
+                    continue
+
+                latest_ts = bars[-1]["timestamp"]
+                _agent_state["status"] = "connected"
+                _agent_state["error"] = None
+                backoff = 10
+
+                if latest_ts != self._last_ts:
+                    self._buffer = bars
+                    self._last_ts = latest_ts
+                    _agent_state["last_candle_time"] = datetime.now(timezone.utc).isoformat()
+
+                    # Pass all bars except the most recent (still building) as closed
+                    closed = list(self._buffer[:-1])
+                    if closed:
+                        self._on_bar_closed(_ALPACA_PROXY_SYMBOL, closed)
+
+                # Wait until roughly the next minute boundary (+5s buffer)
+                now = datetime.now(timezone.utc)
+                seconds_to_next = 65 - (now.second + now.microsecond / 1e6)
+                await asyncio.sleep(max(seconds_to_next, 5))
+
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Alpaca bars HTTP {e.response.status_code}: {e}")
+                _agent_state["status"] = "reconnecting"
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+
+            except Exception as e:
+                logger.error(f"Alpaca market data error: {e}")
+                log_error(f"Alpaca market data error: {e}")
+                _agent_state["status"] = "error"
+                _agent_state["error"] = str(e)[:120]
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+
+
 # ── Mirror Agent ───────────────────────────────────────────────────────────────
 
 class MirrorAgent:
@@ -394,10 +545,16 @@ class MirrorAgent:
     def __init__(self):
         self._strategy = MirrorStrategy()
         self._paper = PaperSim()
-        self._md = TradovateMarketData(
-            on_bar_closed=self._on_bar_closed,
-            symbols=SYMBOLS,
-        )
+        # Choose data source: Tradovate if credentials present, else Alpaca SPY proxy
+        if TRADOVATE_USERNAME:
+            self._md: TradovateMarketData | AlpacaMarketData = TradovateMarketData(
+                on_bar_closed=self._on_bar_closed,
+                symbols=SYMBOLS,
+            )
+        else:
+            self._md = AlpacaMarketData(on_bar_closed=self._on_bar_closed)
+            _agent_state["data_source"] = "Alpaca 1-min SPY (proxy)"
+            logger.info("Mirror Agent: no Tradovate credentials — using Alpaca SPY proxy")
         self._alerts_today: int = 0
 
     def _on_bar_closed(self, symbol: str, candles: list[dict]) -> None:
@@ -533,7 +690,23 @@ class MirrorAgent:
 
     async def run(self) -> None:
         send_startup(SYMBOLS)
-        await self._md.run_forever()
+        try:
+            await self._md.run_forever()
+        except Exception as e:
+            # If Tradovate fails permanently, fall back to Alpaca SPY proxy
+            if isinstance(self._md, TradovateMarketData) and ALPACA_API_KEY:
+                logger.warning(
+                    f"Tradovate data source failed ({e}) — switching to Alpaca SPY proxy"
+                )
+                fallback_msg = (
+                    "Tradovate connection failed. Switching to Alpaca SPY proxy for Mirror Agent alerts."
+                )
+                send_error(fallback_msg)
+                _agent_state["data_source"] = "Alpaca 1-min SPY (proxy, Tradovate fallback)"
+                self._md = AlpacaMarketData(on_bar_closed=self._on_bar_closed)
+                await self._md.run_forever()
+            else:
+                raise
 
 
 # ── Singleton and background launcher ─────────────────────────────────────────

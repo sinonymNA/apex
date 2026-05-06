@@ -746,7 +746,7 @@ async def pipeline_test():
     """Run the full bar pipeline end-to-end and return verbose diagnostics."""
     import datetime as _dt
     from worker.trader import _fetch_bars, _fetch_bars_alpaca, _get_es_bid_ask
-    from worker.strategy import MomentumBreakout
+    from worker.strategy import VWAPTrendPullback
     from worker.db import log_near_miss, get_last_near_miss
 
     out = {}
@@ -776,14 +776,14 @@ async def pipeline_test():
 
     # Step 2: compute_indicators
     try:
-        strat = MomentumBreakout()
+        strat = VWAPTrendPullback()
         df_ind = strat.compute_indicators(df)
-        valid = df_ind.dropna(subset=["high_20", "volume_avg", "atr14"])
+        valid = df_ind.dropna(subset=["vwap", "ema9", "atr14"])
         out["step2_indicators"] = {
             "ok": True,
             "total_rows": len(df_ind),
             "valid_rows": len(valid),
-            "last_high20": float(valid["high_20"].iloc[-1]) if not valid.empty else None,
+            "last_vwap": float(valid["vwap"].iloc[-1]) if not valid.empty else None,
             "last_atr14": float(valid["atr14"].iloc[-1]) if not valid.empty else None,
         }
     except Exception as e:
