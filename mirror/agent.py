@@ -185,28 +185,37 @@ class TradovateMarketData:
             )
             return True
 
-        err = data.get("p-ticket") or data.get("message") or str(data)[:120]
-        logger.error(f"Tradovate auth failed: {err}")
+        # Surface the full Tradovate error so it appears in Railway logs
+        err = data.get("p-ticket") or data.get("message") or str(data)[:200]
+        logger.error(
+            f"Tradovate auth failed — HTTP {r.status_code} — "
+            f"payload name={TRADOVATE_USERNAME!r} appId={TRADOVATE_APP_ID!r} — "
+            f"response: {err}"
+        )
         return False
 
     async def run_forever(self) -> None:
         """Main reconnect loop — authenticates then runs the WebSocket session."""
         ws_url = _TV_WS_URL.get(TRADOVATE_ENV, _TV_WS_URL["demo"])
         backoff = 5
+        _auth_error_notified = False  # send Discord error only once per agent start
 
         while True:
             try:
                 if not self._token:
                     ok = await self.authenticate()
                     if not ok:
-                        logger.error(_NO_DATA_MSG)
                         log_error(_NO_DATA_MSG)
-                        send_error(_NO_DATA_MSG)
                         _agent_state["status"] = "error"
                         _agent_state["error"] = "Authentication failed — check Tradovate credentials"
+                        if not _auth_error_notified:
+                            send_error(_NO_DATA_MSG)
+                            _auth_error_notified = True
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, 300)
                         continue
+
+                _auth_error_notified = False  # reset on successful connect
 
                 logger.info(f"Connecting to Tradovate MD WebSocket ({TRADOVATE_ENV}): {ws_url}")
                 async with websockets.connect(
