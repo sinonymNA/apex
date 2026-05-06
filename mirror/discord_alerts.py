@@ -23,6 +23,7 @@ _WEBHOOK_URL: str = (
 ALERT_COOLDOWN_MINUTES: int = int(os.getenv("ALERT_COOLDOWN_MINUTES", "10"))
 SETUP_FORMING_MIN: int = int(os.getenv("SETUP_FORMING_MIN", "55"))
 MIRROR_WAIT_SILENT: bool = os.getenv("MIRROR_WAIT_SILENT", "false").lower() == "true"
+MIRROR_HEARTBEAT_MINUTES: int = int(os.getenv("MIRROR_HEARTBEAT_MINUTES", "30"))
 
 _WAIT_COOLDOWN = 15    # minutes between WAIT posts per symbol
 _FORMING_COOLDOWN = 5  # minutes between SETUP FORMING posts per (symbol, direction)
@@ -272,6 +273,18 @@ def send_alert(
         }]
     })
     return True
+
+
+def send_heartbeat(*, price: float, alerts_today: int, minutes_silent: int) -> None:
+    """Posted when no SETUP FORMING or BUY/SELL has fired in MIRROR_HEARTBEAT_MINUTES."""
+    if MIRROR_HEARTBEAT_MINUTES <= 0:
+        return
+    _post({
+        "content": (
+            f"💤 **Mirror Agent scanning** — no setups in last {minutes_silent}m\n"
+            f"SPY ~{price:.2f}  ·  {alerts_today} alert{'s' if alerts_today != 1 else ''} today"
+        )
+    })
 
 
 def send_paper_result(

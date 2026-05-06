@@ -28,10 +28,12 @@ from loguru import logger
 from mirror.discord_alerts import (
     send_alert,
     send_error,
+    send_heartbeat,
     send_paper_result,
     send_setup_forming,
     send_startup,
     send_wait,
+    MIRROR_HEARTBEAT_MINUTES,
     SETUP_FORMING_MIN,
 )
 from mirror.logger import log_alert, log_error
@@ -559,6 +561,8 @@ class MirrorAgent:
             _agent_state["data_source"] = "Alpaca 1-min SPY (proxy)"
             logger.info("Mirror Agent: no Tradovate credentials — using Alpaca SPY proxy")
         self._alerts_today: int = 0
+        self._last_discord_time: datetime = datetime.now(timezone.utc)
+        self._last_price: float = 0.0
 
     def _on_bar_closed(self, symbol: str, candles: list[dict]) -> None:
         """Called synchronously each time a 1-minute bar closes."""
@@ -566,6 +570,7 @@ class MirrorAgent:
             return
 
         latest = candles[-1]
+        self._last_price = latest["close"]
 
         # Parse candle timestamp for paper sim
         try:
@@ -594,6 +599,7 @@ class MirrorAgent:
                     entry=t["entry"],
                     exit_price=t["exit_price"],
                 )
+                self._last_discord_time = datetime.now(timezone.utc)
         except Exception as e:
             logger.error(f"Paper sim update error ({symbol}): {e}")
 
@@ -606,6 +612,7 @@ class MirrorAgent:
             return
 
         if not setups:
+            self._maybe_heartbeat(latest["close"])
             return  # no structure found — silence is the right signal
 
         # Partition results by score tier
@@ -648,7 +655,8 @@ class MirrorAgent:
                 continue  # suppressed by cooldown
 
             self._alerts_today += 1
-            now_iso = datetime.now(timezone.utc).isoformat()
+            self._last_discord_time = datetime.now(timezone.utc)
+            now_iso = self._last_discord_time.isoformat()
             _agent_state["alerts_today"] = self._alerts_today
             _agent_state["last_alert_time"] = now_iso
 
@@ -688,7 +696,7 @@ class MirrorAgent:
         best = max(non_qualifying, key=lambda s: s.score)
 
         if best.score >= SETUP_FORMING_MIN:
-            send_setup_forming(
+            sent = send_setup_forming(
                 symbol=symbol,
                 direction=best.direction,
                 score=best.score,
@@ -698,8 +706,10 @@ class MirrorAgent:
                 location_score=best.location_score,
                 pullback_count=best.pullback_count,
             )
+            if sent:
+                self._last_discord_time = datetime.now(timezone.utc)
         else:
-            send_wait(
+            sent = send_wait(
                 symbol=symbol,
                 direction=best.direction,
                 score=best.score,
@@ -708,6 +718,25 @@ class MirrorAgent:
                 confirm_score=best.confirm_score,
                 location_score=best.location_score,
             )
+            if sent:
+                self._last_discord_time = datetime.now(timezone.utc)
+
+        self._maybe_heartbeat(latest["close"])
+
+    def _maybe_heartbeat(self, price: float) -> None:
+        """Send a heartbeat if no meaningful Discord post has happened recently."""
+        if MIRROR_HEARTBEAT_MINUTES <= 0:
+            return
+        now = datetime.now(timezone.utc)
+        silent_seconds = (now - self._last_discord_time).total_seconds()
+        silent_minutes = int(silent_seconds // 60)
+        if silent_minutes >= MIRROR_HEARTBEAT_MINUTES:
+            send_heartbeat(
+                price=price,
+                alerts_today=self._alerts_today,
+                minutes_silent=silent_minutes,
+            )
+            self._last_discord_time = now
 
     def _get_risk_params(self, symbol: str) -> dict:
         for prefix in ("MNQ", "MES"):
