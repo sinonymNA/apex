@@ -380,6 +380,36 @@ async def diagnostics():
         "detail": "DASHBOARD_SECRET configured" if secret_set else "Not set — anyone can access the dashboard",
     }
 
+    # 7. SABLE Discord bot
+    bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
+    feed_id = os.getenv("DISCORD_FEED_CHANNEL_ID", "")
+    talk_id = os.getenv("DISCORD_TALK_CHANNEL_ID", "")
+    if not bot_token:
+        checks["discord_bot"] = {"ok": False, "detail": "DISCORD_BOT_TOKEN not set — bot is disabled"}
+    elif not feed_id or not talk_id:
+        missing = [v for v, k in [("DISCORD_FEED_CHANNEL_ID", feed_id), ("DISCORD_TALK_CHANNEL_ID", talk_id)] if not k]
+        checks["discord_bot"] = {"ok": False, "detail": f"Token set but missing: {', '.join(missing)}"}
+    else:
+        bot_alive = any(t.name == "discord-bot" for t in threading.enumerate())
+        checks["discord_bot"] = {
+            "ok": bot_alive,
+            "detail": "Bot running" if bot_alive else "Token+channels configured but thread not found — check logs",
+        }
+
+    # 8. Mirror Agent webhook
+    mirror_hook = os.getenv("DISCORD_MIRROR_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    mirror_alive = any(t.name == "mirror-agent" for t in threading.enumerate())
+    if not mirror_hook:
+        checks["mirror_discord"] = {
+            "ok": False,
+            "detail": "DISCORD_MIRROR_WEBHOOK_URL not set — Mirror alerts will be silently dropped",
+        }
+    else:
+        checks["mirror_discord"] = {
+            "ok": True,
+            "detail": f"Webhook configured | Mirror Agent {'running' if mirror_alive else 'not running — check logs'}",
+        }
+
     all_ok = all(v["ok"] for v in checks.values())
     return {"all_ok": all_ok, "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
 
@@ -645,6 +675,46 @@ async def pipeline_test():
 
     return out
 
+
+
+@app.post("/api/debug/test-mirror-discord", dependencies=[Depends(verify_auth)])
+async def test_mirror_discord():
+    """
+    Send a test message via the Mirror Agent Discord webhook.
+    Use this to confirm DISCORD_MIRROR_WEBHOOK_URL is correctly set in Railway.
+    """
+    webhook_url = os.getenv("DISCORD_MIRROR_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL", "")
+    if not webhook_url:
+        return {
+            "ok": False,
+            "error": (
+                "No webhook URL configured. "
+                "Set DISCORD_MIRROR_WEBHOOK_URL in Railway Variables. "
+                "Get it from: Discord channel → Settings → Integrations → Webhooks → New Webhook → Copy URL"
+            ),
+        }
+
+    payload = {
+        "embeds": [{
+            "title": "✅ Mirror Agent — Webhook Test",
+            "description": (
+                "Webhook is correctly configured. "
+                "Mirror System v2 alerts will appear here when setups score ≥ threshold."
+            ),
+            "color": 0x00CC44,
+            "footer": {"text": "Sable Stocks — Mirror Agent v1"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+    }
+
+    try:
+        async with __import__("httpx").AsyncClient() as client:
+            r = await client.post(webhook_url, json=payload, timeout=8.0)
+        if r.status_code in (200, 204):
+            return {"ok": True, "detail": "Test message sent — check your Discord channel"}
+        return {"ok": False, "error": f"Discord returned HTTP {r.status_code}: {r.text[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/mirror/health")
