@@ -29,7 +29,10 @@ from mirror.discord_alerts import (
     send_alert,
     send_error,
     send_paper_result,
+    send_setup_forming,
     send_startup,
+    send_wait,
+    SETUP_FORMING_MIN,
 )
 from mirror.logger import log_alert, log_error
 from mirror.paper_sim import PaperSim
@@ -602,21 +605,24 @@ class MirrorAgent:
             log_error(f"Strategy error ({symbol}): {e}")
             return
 
-        for setup in setups:
-            if setup.score < SCORE_THRESHOLD:
-                continue
+        if not setups:
+            return  # no structure found — silence is the right signal
 
+        # Partition results by score tier
+        qualifying = [s for s in setups if s.score >= SCORE_THRESHOLD]
+        non_qualifying = [s for s in setups if s.score < SCORE_THRESHOLD]
+
+        # ── BUY / SELL (score ≥ threshold) ────────────────────────────────────
+        for setup in qualifying:
             price = latest["close"]
             rp = self._get_risk_params(symbol)
-            stop_pts = rp["stop"]
-            tgt_pts = rp["target"]
 
             if setup.direction == "LONG":
-                stop = round(price - stop_pts, 2)
-                target = round(price + tgt_pts, 2)
+                stop = round(price - rp["stop"], 2)
+                target = round(price + rp["target"], 2)
             else:
-                stop = round(price + stop_pts, 2)
-                target = round(price - tgt_pts, 2)
+                stop = round(price + rp["stop"], 2)
+                target = round(price - rp["target"], 2)
 
             sent = send_alert(
                 symbol=symbol,
@@ -632,6 +638,10 @@ class MirrorAgent:
                 setup_summary=setup.setup_summary,
                 ema9=setup.ema9,
                 ema21=setup.ema21,
+                trend_score=setup.trend_score,
+                pullback_score=setup.pullback_score,
+                confirm_score=setup.confirm_score,
+                location_score=setup.location_score,
             )
 
             if not sent:
@@ -670,6 +680,34 @@ class MirrorAgent:
                 summary=setup.setup_summary,
             )
             _agent_state["open_paper_trades"] = self._paper.open_count
+
+        # ── WAIT / SETUP FORMING (no qualifying setup this bar) ───────────────
+        if qualifying:
+            return  # already sent BUY/SELL — don't also send a WAIT
+
+        best = max(non_qualifying, key=lambda s: s.score)
+
+        if best.score >= SETUP_FORMING_MIN:
+            send_setup_forming(
+                symbol=symbol,
+                direction=best.direction,
+                score=best.score,
+                trend_score=best.trend_score,
+                pullback_score=best.pullback_score,
+                confirm_score=best.confirm_score,
+                location_score=best.location_score,
+                pullback_count=best.pullback_count,
+            )
+        else:
+            send_wait(
+                symbol=symbol,
+                direction=best.direction,
+                score=best.score,
+                trend_score=best.trend_score,
+                pullback_score=best.pullback_score,
+                confirm_score=best.confirm_score,
+                location_score=best.location_score,
+            )
 
     def _get_risk_params(self, symbol: str) -> dict:
         for prefix in ("MNQ", "MES"):
