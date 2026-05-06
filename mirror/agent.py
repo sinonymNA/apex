@@ -213,7 +213,7 @@ class TradovateMarketData:
                     ws_url,
                     ping_interval=20,
                     ping_timeout=30,
-                    additional_headers={"User-Agent": f"MirrorAgent/{TRADOVATE_APP_VERSION}"},
+                    extra_headers={"User-Agent": f"MirrorAgent/{TRADOVATE_APP_VERSION}"},
                 ) as ws:
                     backoff = 5
                     _agent_state["status"] = "connected"
