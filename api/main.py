@@ -414,6 +414,159 @@ async def diagnostics():
     return {"all_ok": all_ok, "checks": checks, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+@app.post("/api/debug/fire-test-alert", dependencies=[Depends(verify_auth)])
+async def fire_test_alert():
+    """
+    End-to-end alert pipeline test.
+
+    Builds a synthetic LONG setup, scores it with MirrorStrategy, fires a real
+    Discord alert (bypassing the score threshold — this is a pipeline test, not a
+    live signal), and logs a paper trade. Use this to confirm the full chain works
+    before relying on live Tradovate data.
+    """
+    from datetime import timedelta
+    from mirror.strategy import MirrorStrategy, SCORE_THRESHOLD
+    from mirror.discord_alerts import send_alert, _last_alert
+    from mirror.paper_sim import PaperSim
+    from mirror.logger import log_alert
+
+    # ── Build synthetic candles (mixed trend to avoid spike/exhaustion penalty) ─
+    def _ts(i):
+        base = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
+        return (base + timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def _c(o, h, l, c, i):
+        return {"open": float(o), "high": float(h), "low": float(l), "close": float(c), "timestamp": _ts(i)}
+
+    # 10-candle trend: 7 bullish + 3 bearish (70% bull, no spike penalty)
+    # Two bearish in last 5 (indices 7,8) so exhaustion check stays < 4
+    trend_pattern = [
+        # (bull?, body, wick)
+        (True,  0.9, 0.3),   # 0
+        (True,  0.9, 0.3),   # 1
+        (True,  0.9, 0.3),   # 2
+        (False, 0.3, 0.2),   # 3 — small pullback keeps structure
+        (True,  1.0, 0.3),   # 4
+        (True,  1.0, 0.3),   # 5
+        (True,  1.0, 0.3),   # 6
+        (False, 0.3, 0.2),   # 7 — in last-5, reduces exhaustion count
+        (False, 0.3, 0.2),   # 8 — in last-5, reduces exhaustion count
+        (True,  1.0, 0.3),   # 9
+    ]
+    candles = []
+    price = 5000.0
+    for i, (bull, body, wick) in enumerate(trend_pattern):
+        if bull:
+            candles.append(_c(price, price + body + wick, price - wick, price + body, i))
+            price += body
+        else:
+            candles.append(_c(price + body, price + body + wick, price - wick, price, i))
+            price -= body * 0.3  # slight drift down keeps structure realistic
+
+    # 4-candle pullback (bearish, controlled)
+    pb_base = price
+    for j in range(4):
+        top = pb_base - j * 0.7
+        candles.append(_c(top, top + 0.15, top - 0.7, top - 0.6, 10 + j))
+
+    # Strong bullish confirmation: closes well above pullback high, near its own high
+    co = pb_base - 2.6
+    candles.append(_c(co, co + 4.5, co - 0.15, co + 4.2, 14))
+
+    # ── Score with real strategy ───────────────────────────────────────────────
+    strat = MirrorStrategy()
+    results = strat.analyze(candles)
+    longs = [r for r in results if r.direction == "LONG"]
+
+    if not longs:
+        return {
+            "ok": False,
+            "error": "Synthetic setup produced no LONG result — strategy logic may have changed",
+            "candle_count": len(candles),
+        }
+
+    setup = longs[0]
+    price_now = candles[-1]["close"]
+    stop = round(price_now - 5.0, 2)
+    target = round(price_now + 6.0, 2)
+    test_symbol = "TEST_MESM6"
+
+    # Always fire for test — clear cooldown so repeated calls work
+    _last_alert.pop((test_symbol, "LONG"), None)
+
+    webhook_configured = bool(
+        os.getenv("DISCORD_MIRROR_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL")
+    )
+
+    # ── Fire real Discord alert (pipeline test — threshold bypassed) ───────────
+    discord_sent = send_alert(
+        symbol=test_symbol,
+        direction="LONG",
+        score=setup.score,
+        price=price_now,
+        stop=stop,
+        target=target,
+        trend_read=setup.trend_read,
+        pullback_count=setup.pullback_count,
+        confirm_vs_avg=setup.confirm_vs_avg_body,
+        extension_risk=setup.extension_risk,
+        setup_summary="[PIPELINE TEST] " + setup.setup_summary,
+        ema9=setup.ema9,
+        ema21=setup.ema21,
+    )
+
+    # ── Log + open paper trade ─────────────────────────────────────────────────
+    log_alert({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "symbol": test_symbol,
+        "direction": "LONG",
+        "score": setup.score,
+        "price": price_now,
+        "stop": stop,
+        "target": target,
+        "test": True,
+    })
+
+    paper = PaperSim()
+    trade_id = paper.open_trade(
+        symbol=test_symbol,
+        direction="LONG",
+        entry=price_now,
+        stop=stop,
+        target=target,
+        score=setup.score,
+        summary=setup.setup_summary,
+    )
+
+    return {
+        "ok": True,
+        "strategy": {
+            "score": setup.score,
+            "threshold": SCORE_THRESHOLD,
+            "above_threshold": setup.score >= SCORE_THRESHOLD,
+            "breakdown": f"trend={setup.trend_score} pullback={setup.pullback_score} confirm={setup.confirm_score} location={setup.location_score}",
+            "pullback_count": setup.pullback_count,
+            "trend_read": setup.trend_read,
+            "extension_risk": setup.extension_risk,
+        },
+        "discord": {
+            "webhook_configured": webhook_configured,
+            "sent": discord_sent,
+            "note": "Check your Discord channel for the test alert" if discord_sent else (
+                "Set DISCORD_MIRROR_WEBHOOK_URL in Railway Variables — alert was not sent"
+                if not webhook_configured else "Unknown send failure — check Railway logs"
+            ),
+        },
+        "paper_trade": {
+            "id": trade_id,
+            "entry": price_now,
+            "stop": stop,
+            "target": target,
+            "logged_to": "logs/mirror_paper_trades.jsonl",
+        },
+    }
+
+
 @app.get("/api/debug/last-signal", dependencies=[Depends(verify_auth)])
 async def get_last_signal():
     """Most recent near-miss bar evaluation with plain-English summary."""
