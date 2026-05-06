@@ -439,8 +439,10 @@ class AlpacaMarketData:
     def __init__(
         self,
         on_bar_closed: Callable[[str, list[dict]], None],
+        on_idle: Optional[Callable[[float], None]] = None,
     ):
         self._on_bar_closed = on_bar_closed
+        self._on_idle = on_idle
         self._last_ts: Optional[str] = None
         self._buffer: list[dict] = []
 
@@ -509,6 +511,8 @@ class AlpacaMarketData:
                 _agent_state["error"] = None
                 backoff = 10
 
+                latest_price = float(bars[-1]["close"])
+
                 if latest_ts != self._last_ts:
                     self._buffer = bars
                     self._last_ts = latest_ts
@@ -518,6 +522,10 @@ class AlpacaMarketData:
                     closed = list(self._buffer[:-1])
                     if closed:
                         self._on_bar_closed(_ALPACA_PROXY_SYMBOL, closed)
+
+                # Heartbeat check on every poll, whether or not a new bar arrived
+                if self._on_idle:
+                    self._on_idle(latest_price)
 
                 # Wait until roughly the next minute boundary (+5s buffer)
                 now = datetime.now(timezone.utc)
@@ -557,7 +565,10 @@ class MirrorAgent:
                 symbols=SYMBOLS,
             )
         else:
-            self._md = AlpacaMarketData(on_bar_closed=self._on_bar_closed)
+            self._md = AlpacaMarketData(
+                on_bar_closed=self._on_bar_closed,
+                on_idle=self._maybe_heartbeat,
+            )
             _agent_state["data_source"] = "Alpaca 1-min SPY (proxy)"
             logger.info("Mirror Agent: no Tradovate credentials — using Alpaca SPY proxy")
         self._alerts_today: int = 0
@@ -612,7 +623,6 @@ class MirrorAgent:
             return
 
         if not setups:
-            self._maybe_heartbeat(latest["close"])
             return  # no structure found — silence is the right signal
 
         # Partition results by score tier
@@ -720,8 +730,6 @@ class MirrorAgent:
             )
             if sent:
                 self._last_discord_time = datetime.now(timezone.utc)
-
-        self._maybe_heartbeat(latest["close"])
 
     def _maybe_heartbeat(self, price: float) -> None:
         """Send a heartbeat if no meaningful Discord post has happened recently."""

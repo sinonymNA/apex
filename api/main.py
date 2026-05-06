@@ -874,7 +874,16 @@ async def test_mirror_discord():
 async def mirror_health():
     """Mirror Agent health — no auth required."""
     from mirror.agent import _agent_state
-    return _agent_state
+    state = dict(_agent_state)
+    if state.get("last_candle_time"):
+        try:
+            last = datetime.fromisoformat(state["last_candle_time"])
+            state["seconds_since_last_candle"] = int(
+                (datetime.now(timezone.utc) - last).total_seconds()
+            )
+        except Exception:
+            pass
+    return state
 
 
 @app.get("/mirror/stats", dependencies=[Depends(verify_auth)])
