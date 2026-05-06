@@ -4,7 +4,7 @@ backtest/run.py — Backtesting and regime model training for Apex Trading Syste
 Steps:
   1. Fetch 5yr daily SPY + 60day 5min SPY via yfinance
   2. Train regime classifier on daily data and save pkl
-  3. Run MomentumBreakout on 5min data (walk-forward: pre-2024 / 2024+)
+  3. Run VWAPTrendPullback on 5min data (walk-forward: pre-2024 / 2024+)
   4. Compute and print side-by-side metrics table
   5. Evaluate against gate criteria (GATE PASSED / GATE FAILED)
   6. Save results to logs/backtest_report.json
@@ -25,7 +25,7 @@ import pytz
 import yfinance as yf
 from loguru import logger
 
-from worker.strategy import MomentumBreakout
+from worker.strategy import VWAPTrendPullback
 from models.regime_classifier import RegimeClassifier
 
 
@@ -147,12 +147,12 @@ def fetch_data() -> tuple:
 # ── Strategy simulation ───────────────────────────────────────────────────────
 def run_backtest_on(df_5min: pd.DataFrame, label: str) -> tuple[list, dict]:
     """
-    Simulate the MomentumBreakout strategy on 5-min OHLCV data.
+    Simulate the VWAPTrendPullback strategy on 5-min OHLCV data.
 
     Uses a rolling window; no forward-looking data.
     Returns (trades_list, metrics_dict).
     """
-    strategy = MomentumBreakout()
+    strategy = VWAPTrendPullback()
     trades = []
     position = None  # {entry, stop, target, entry_time, entry_price, atr}
 
@@ -161,7 +161,7 @@ def run_backtest_on(df_5min: pd.DataFrame, label: str) -> tuple[list, dict]:
 
     # Compute indicators on the full dataset first
     df = strategy.compute_indicators(df_5min.copy())
-    valid_df = df.dropna(subset=["high_20", "volume_avg", "atr14"])
+    valid_df = df.dropna(subset=["vwap", "ema9", "atr14"])
 
     logger.info(f"[{label}] Simulating on {len(valid_df)} valid bars...")
 
