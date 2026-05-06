@@ -103,6 +103,15 @@ def _start_discord_bot():
         logger.error(f"Failed to start Discord bot: {e}")
 
 
+def _start_mirror_agent():
+    """Start Mirror Agent v1 alert scanner as a daemon thread (ignores errors)."""
+    try:
+        from mirror.agent import start_background
+        start_background()
+    except Exception as e:
+        logger.error(f"Failed to start Mirror Agent: {e}")
+
+
 # ── Startup ────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -118,7 +127,10 @@ async def startup_event():
     # 4. Start Discord bot (also non-blocking)
     threading.Thread(target=_start_discord_bot, daemon=True, name="discord-launcher").start()
 
-    # 4. Log whether dashboard HTML is present
+    # 5. Start Mirror Agent alert scanner (also non-blocking)
+    threading.Thread(target=_start_mirror_agent, daemon=True, name="mirror-launcher").start()
+
+    # 6. Log whether dashboard HTML is present
     if _DASHBOARD_HTML.exists():
         logger.info("Dashboard HTML found — serving at /")
     else:
@@ -633,6 +645,24 @@ async def pipeline_test():
 
     return out
 
+
+
+@app.get("/mirror/health")
+async def mirror_health():
+    """Mirror Agent health — no auth required."""
+    from mirror.agent import _agent_state
+    return _agent_state
+
+
+@app.get("/mirror/stats", dependencies=[Depends(verify_auth)])
+async def mirror_stats():
+    """Mirror Agent paper simulation stats."""
+    try:
+        from mirror.agent import get_or_create_agent
+        agent = get_or_create_agent()
+        return agent.get_stats()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/", include_in_schema=False)
