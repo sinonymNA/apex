@@ -112,6 +112,15 @@ def _start_mirror_agent():
         logger.error(f"Failed to start Mirror Agent: {e}")
 
 
+def _start_frontier_monitor():
+    """Start Frontier Go Wild deal monitor as a daemon thread (ignores errors)."""
+    try:
+        from frontier.monitor import start_background as frontier_start
+        frontier_start()
+    except Exception as e:
+        logger.error(f"Failed to start Frontier monitor: {e}")
+
+
 # ── Startup ────────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
@@ -130,7 +139,10 @@ async def startup_event():
     # 5. Start Mirror Agent alert scanner (also non-blocking)
     threading.Thread(target=_start_mirror_agent, daemon=True, name="mirror-launcher").start()
 
-    # 6. Log whether dashboard HTML is present
+    # 6. Start Frontier Go Wild monitor (also non-blocking)
+    threading.Thread(target=_start_frontier_monitor, daemon=True, name="frontier-launcher").start()
+
+    # 7. Log whether dashboard HTML is present
     if _DASHBOARD_HTML.exists():
         logger.info("Dashboard HTML found — serving at /")
     else:
