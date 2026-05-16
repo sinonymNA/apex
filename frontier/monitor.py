@@ -5,19 +5,12 @@ Three parallel monitors, all independent — if one source fails the others
 continue running:
 
   1. Presale URL probe  — polls /gowildpresale every 5 min.
-     HTTP 200 + GoWild keywords in body = sale just went live.
-     Redirects or 404 = not active. 403 = can't determine, skip.
+  2. Google News RSS    — polls a "frontier airlines" deals search every 10 min.
+  3. PR Newswire RSS    — polls Frontier's press release feed every 15 min.
 
-  2. Google News RSS    — polls a "frontier airlines go wild" news search
-     every 10 min. Catches press releases and news articles from all
-     sources within minutes of publication.
-
-  3. PR Newswire RSS    — polls Frontier's official press release feed
-     every 15 min as a second opinion. Seeds seen GUIDs on first run so
-     old articles never trigger alerts.
-
-All alerts go to the existing Discord webhook (DISCORD_MIRROR_WEBHOOK_URL
-or DISCORD_WEBHOOK_URL). No new infrastructure needed.
+If a destination watchlist is set via frontier.destinations, deal alerts
+are filtered to only mention deals relevant to watched airports.
+Use fetch_current_deals() for an on-demand snapshot of recent deal news.
 """
 from __future__ import annotations
 
@@ -35,9 +28,10 @@ from loguru import logger
 PRESALE_URL = "https://www.flyfrontier.com/gowildpresale"
 DEALS_URL   = "https://www.flyfrontier.com/deals/gowild-pass/"
 
+# Broader search — catches all Frontier sales, not just Go Wild
 _GOOGLE_NEWS_RSS = (
     "https://news.google.com/rss/search"
-    "?q=frontier+airlines+%22go+wild%22&hl=en-US&gl=US&ceid=US:en"
+    "?q=frontier+airlines+deal+OR+sale+OR+%22go+wild%22&hl=en-US&gl=US&ceid=US:en"
 )
 _PRNEWSWIRE_RSS = (
     "https://www.prnewswire.com/rss/news-releases-list.rss"
@@ -111,9 +105,51 @@ def _parse_rss(xml_text: str) -> list[dict]:
     return items
 
 
+_DEAL_KEYWORDS = [
+    "go wild", "gowild", "sale", "deal", "fare", "discount",
+    "unlimited flights", "all-you-can-fly",
+]
+
+
+def _has_deal(item: dict) -> bool:
+    text = (item["title"] + " " + item["description"]).lower()
+    return any(kw in text for kw in _DEAL_KEYWORDS)
+
+
 def _has_gowild(item: dict) -> bool:
     text = (item["title"] + " " + item["description"]).lower()
     return any(kw in text for kw in GOWILD_KEYWORDS)
+
+
+def _passes_watchlist(item: dict) -> bool:
+    """Returns True if item is relevant to watched airports, or watchlist is empty."""
+    try:
+        from frontier.destinations import matches_watchlist
+        return matches_watchlist(item["title"], item["description"])
+    except Exception:
+        return True
+
+
+# ── On-demand deals fetch ──────────────────────────────────────────────────────
+
+async def fetch_current_deals() -> list[dict]:
+    """
+    Fetch recent Frontier deal articles from Google News RSS.
+    Returns list of deal dicts with title, link, pubDate.
+    Used for on-demand 'show me deals' queries from Discord.
+    """
+    deals: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20.0, headers=_HEADERS) as client:
+            r = await client.get(_GOOGLE_NEWS_RSS)
+        if r.status_code != 200:
+            logger.warning(f"fetch_current_deals: Google News returned {r.status_code}")
+            return []
+        items = _parse_rss(r.text)
+        deals = [i for i in items if _has_deal(i)]
+    except Exception as e:
+        logger.warning(f"fetch_current_deals error: {e}")
+    return deals
 
 
 # ── Monitor 1: Presale URL probe ───────────────────────────────────────────────
@@ -185,7 +221,7 @@ class GoogleNewsMonitor:
                     continue
                 if guid not in self._seen:
                     self._seen.add(guid)
-                    if self._seeded and _has_gowild(item):
+                    if self._seeded and _has_deal(item) and _passes_watchlist(item):
                         new_items.append(item)
 
             if not self._seeded:

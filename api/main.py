@@ -130,8 +130,11 @@ async def startup_event():
     # 2. Train model in background (non-blocking)
     threading.Thread(target=_train_model_if_needed, daemon=True, name="model-trainer").start()
 
-    # 3. Start trading worker (also non-blocking)
-    threading.Thread(target=_start_worker, daemon=True, name="worker-launcher").start()
+    # 3. Start trading worker (also non-blocking) — skip if TRADING_ENABLED=false
+    if os.getenv("TRADING_ENABLED", "true").lower() == "true":
+        threading.Thread(target=_start_worker, daemon=True, name="worker-launcher").start()
+    else:
+        logger.info("Trading worker disabled (TRADING_ENABLED=false)")
 
     # 4. Start Discord bot (also non-blocking)
     threading.Thread(target=_start_discord_bot, daemon=True, name="discord-launcher").start()
