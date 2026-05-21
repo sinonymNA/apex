@@ -148,25 +148,30 @@ def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
             if elapsed >= 90 and reason is None:
                 reason  = "timeout"
 
-            # multi-stage trail (use initial distance so R doesn't drift)
+            # multi-stage trail (uses initial dist; 2R lock-in for A+ 3R targets)
             if reason is None:
-                entry = position["entry"]
-                D     = position["stop_dist"]
+                entry    = position["entry"]
+                D        = position["stop_dist"]
+                target_r = position.get("target_r", 2.0)
                 if D > 0:
                     if d == "LONG":
                         r = (price - entry) / D
-                        if r >= 1.5:
-                            tgt = round(entry + 0.5 * D, 2)
-                            if position["stop"] < tgt:
-                                position["stop"] = tgt
+                        lock_15R = round(entry + 1.5 * D, 2)
+                        lock_05R = round(entry + 0.5 * D, 2)
+                        if target_r >= 3.0 and r >= 2.0 and position["stop"] < lock_15R:
+                            position["stop"] = lock_15R
+                        elif r >= 1.5 and position["stop"] < lock_05R:
+                            position["stop"] = lock_05R
                         elif r >= 1.0 and position["stop"] < entry:
                             position["stop"] = round(entry + 0.02, 2)
                     else:
                         r = (entry - price) / D
-                        if r >= 1.5:
-                            tgt = round(entry - 0.5 * D, 2)
-                            if position["stop"] > tgt:
-                                position["stop"] = tgt
+                        lock_15R = round(entry - 1.5 * D, 2)
+                        lock_05R = round(entry - 0.5 * D, 2)
+                        if target_r >= 3.0 and r >= 2.0 and position["stop"] > lock_15R:
+                            position["stop"] = lock_15R
+                        elif r >= 1.5 and position["stop"] > lock_05R:
+                            position["stop"] = lock_05R
                         elif r >= 1.0 and position["stop"] > entry:
                             position["stop"] = round(entry - 0.02, 2)
 
@@ -190,6 +195,7 @@ def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
                     "time":      bar_time.strftime("%H:%M"),
                     "dir":       d[0],
                     "strategy":  position["strategy"],
+                    "grade":     position.get("grade", "?"),
                     "entry":     position["entry"],
                     "exit":      exit_px,
                     "contracts": c,
@@ -233,6 +239,9 @@ def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
             "stop_dist":  sig["stop_distance"],
             "entry_time": bar_time,
             "strategy":   sig.get("strategy", "?"),
+            "grade":      sig.get("grade", "?"),
+            "target_r":   sig.get("target_r", 2.0),
+            "score":      sig.get("score", 0),
         }
 
     # force-close leftover
@@ -249,6 +258,7 @@ def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
         r_mult = round(pnl / (D * SPY_X * MES_PV * c), 2) if D > 0 and c > 0 else 0.0
         log.append({
             "time": "16:00", "dir": d[0], "strategy": position["strategy"],
+            "grade": position.get("grade", "?"),
             "entry": position["entry"], "exit": exit_px, "contracts": c,
             "pnl": pnl, "r": r_mult, "reason": "EOD",
         })
@@ -310,12 +320,13 @@ for label, scenario, seed in WEEK:
     print(f"{'─' * W}")
 
     if not res["trades"]:
-        print("    (no trades — signals filtered by RSI/volume/chop/risk)")
+        print("    (no trades — filtered by trend/grade/RSI/volume/chop/risk)")
     else:
-        print(f"  {'Time':>5}  {'D':1}  {'Strategy':<14} {'Entry':>7} {'Exit':>7} "
+        print(f"  {'Time':>5}  {'D':1}  {'Grade':>3}  {'Strategy':<14} {'Entry':>7} {'Exit':>7} "
               f"{'Ctrs':>4} {'P&L':>9} {'R':>5}  Exit reason")
         for t in res["trades"]:
-            row = (f"  {t['time']:>5}  {t['dir']:1}  {t['strategy']:<14} "
+            row = (f"  {t['time']:>5}  {t['dir']:1}  {t.get('grade','?'):>3}  "
+                   f"{t['strategy']:<14} "
                    f"{t['entry']:>7.2f} {t['exit']:>7.2f} "
                    f"{t['contracts']:>4} ${t['pnl']:>+8.0f} "
                    f"{t['r']:>+5.2f}R  {t['reason']}")
@@ -367,6 +378,22 @@ if total:
         swr = 100 * d["w"] / d["n"]
         print(f"    {s:<16}  {d['n']:>2} trades  "
               f"{d['w']}/{d['n']} wins ({swr:.0f}%)  ${d['pnl']:>+.0f}")
+
+    # by grade
+    by_g: dict = {}
+    for t in all_trades:
+        g = t.get("grade", "?")
+        by_g.setdefault(g, {"n": 0, "pnl": 0.0, "w": 0})
+        by_g[g]["n"]   += 1
+        by_g[g]["pnl"] += t["pnl"]
+        by_g[g]["w"]   += 1 if t["pnl"] > 0 else 0
+    print(f"\n  ── By grade ──")
+    for g in ("A+", "A", "B"):
+        if g in by_g:
+            d = by_g[g]
+            gwr = 100 * d["w"] / d["n"]
+            print(f"    {g:<3}              {d['n']:>2} trades  "
+                  f"{d['w']}/{d['n']} wins ({gwr:.0f}%)  ${d['pnl']:>+.0f}")
 else:
     print("  Total trades         : 0  (no signals generated)")
 

@@ -694,27 +694,38 @@ def five_min_bar_job():
                 _close_position("target_hit", current_price)
                 return
 
-        # Multi-stage trailing stop using initial stop distance (never drifts)
+        # Multi-stage trailing stop — locks profit at 1R/1.5R/(2R for A+ targets)
+        # All thresholds use INITIAL stop_distance so R-multiples stay accurate
         entry     = pos["entry"]
         init_dist = pos.get("stop_distance", abs(entry - pos["stop"]))
+        target_r  = pos.get("target_r", 2.0)
         if init_dist > 0:
             if direction == "LONG":
-                r = (current_price - entry) / init_dist
-                be_stop     = round(entry + 0.02, 2)
-                locked_stop = round(entry + 0.5 * init_dist, 2)
-                if r >= 1.5 and pos["stop"] < locked_stop:
-                    pos["stop"] = locked_stop
-                    logger.info(f"TRAIL: 1.5R → locked {pos['stop']:.2f} (+0.5R)")
+                r          = (current_price - entry) / init_dist
+                be_stop    = round(entry + 0.02, 2)
+                lock_05R   = round(entry + 0.5 * init_dist, 2)
+                lock_15R   = round(entry + 1.5 * init_dist, 2)
+                # 2R: only for A+ trades targeting 3R — lock in 1.5R
+                if target_r >= 3.0 and r >= 2.0 and pos["stop"] < lock_15R:
+                    pos["stop"] = lock_15R
+                    logger.info(f"TRAIL: 2R → locked 1.5R at {pos['stop']:.2f} [{pos.get('grade','?')}]")
+                elif r >= 1.5 and pos["stop"] < lock_05R:
+                    pos["stop"] = lock_05R
+                    logger.info(f"TRAIL: 1.5R → locked 0.5R at {pos['stop']:.2f}")
                 elif r >= 1.0 and pos["stop"] < be_stop:
                     pos["stop"] = be_stop
                     logger.info(f"TRAIL: 1R → breakeven {pos['stop']:.2f}")
             elif direction == "SHORT":
-                r = (entry - current_price) / init_dist
-                be_stop     = round(entry - 0.02, 2)
-                locked_stop = round(entry - 0.5 * init_dist, 2)
-                if r >= 1.5 and pos["stop"] > locked_stop:
-                    pos["stop"] = locked_stop
-                    logger.info(f"TRAIL: 1.5R → locked {pos['stop']:.2f} (+0.5R)")
+                r          = (entry - current_price) / init_dist
+                be_stop    = round(entry - 0.02, 2)
+                lock_05R   = round(entry - 0.5 * init_dist, 2)
+                lock_15R   = round(entry - 1.5 * init_dist, 2)
+                if target_r >= 3.0 and r >= 2.0 and pos["stop"] > lock_15R:
+                    pos["stop"] = lock_15R
+                    logger.info(f"TRAIL: 2R → locked 1.5R at {pos['stop']:.2f} [{pos.get('grade','?')}]")
+                elif r >= 1.5 and pos["stop"] > lock_05R:
+                    pos["stop"] = lock_05R
+                    logger.info(f"TRAIL: 1.5R → locked 0.5R at {pos['stop']:.2f}")
                 elif r >= 1.0 and pos["stop"] > be_stop:
                     pos["stop"] = be_stop
                     logger.info(f"TRAIL: 1R → breakeven {pos['stop']:.2f}")
@@ -821,11 +832,17 @@ def five_min_bar_job():
         return
 
     # ── Signal fired log ──────────────────────────────────────────────────────
+    grade    = signal.get("grade", "?")
+    score    = signal.get("score", 0)
+    trend    = signal.get("trend", "?")
+    factors  = signal.get("factors", [])
+    target_r = signal.get("target_r", 2.0)
+    sweep    = "SWEEP" if signal.get("has_sweep") else ""
     logger.info(
-        f"SIGNAL FIRED [{direction}] [{signal.get('strategy', 'VWAP')}]: "
+        f"SIGNAL FIRED [{grade}] [{direction}] [{signal.get('strategy', 'VWAP')}] {sweep}: "
         f"{now_et.strftime('%H:%M:%S')} | "
-        f"SPY={signal['price']:.2f} | "
-        f"OR={signal.get('or_high') or 0:.2f}/{signal.get('or_low') or 0:.2f} | "
+        f"SPY={signal['price']:.2f} | Score={score} ({'+'.join(factors)}) | "
+        f"Trend={trend} | Target={target_r:.1f}R | "
         f"VWAP={signal.get('vwap', 0):.2f} EMA9={signal.get('ema9', 0):.2f} "
         f"EMA21={signal.get('ema21', 0):.2f} | "
         f"ATR={signal.get('atr', 0):.4f}(raw={signal.get('raw_atr', 0):.4f}) | "
@@ -833,9 +850,7 @@ def five_min_bar_job():
         f"Dist={signal['stop_distance']:.4f} | "
         f"Phase={signal.get('phase', '?')} MaxRisk=${signal.get('max_risk', 0):.0f} "
         f"Actual=${signal.get('risk_actual', 0):.0f} | "
-        f"Contracts={signal['contracts']} MES | "
-        f"VWAPx={signal.get('vwap_crossings', 'N/A')} | "
-        f"Regime={regime}"
+        f"Contracts={signal['contracts']} MES | Regime={regime}"
     )
 
     # ── Place entry order ─────────────────────────────────────────────────────
@@ -870,6 +885,10 @@ def five_min_bar_job():
         "stop_distance": signal["stop_distance"],
         "order_id": order.get("id"),
         "es_entry": _es_entry_price,    # ES proxy price for P&L calculation
+        "grade": signal.get("grade", "?"),
+        "target_r": signal.get("target_r", 2.0),
+        "score": signal.get("score", 0),
+        "strategy": signal.get("strategy", "?"),
     }
     logger.info(
         f"Position opened [{direction}]: {SYMBOL} @ {signal['price']:.2f} | "

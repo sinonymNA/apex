@@ -177,8 +177,70 @@ class VWAPTrendPullback:
         else:
             df["rsi14"] = np.nan
 
+        # EMA 50 — medium-term trend filter
+        df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
         self._update_opening_range(df)
         return df
+
+    def compute_trend(self, df: pd.DataFrame) -> str:
+        """
+        Determine medium-term trend from EMA50 position + slope.
+        Returns "BULL" / "BEAR" / "NEUTRAL".
+        """
+        valid = df.dropna(subset=["ema50", "Close"])
+        if len(valid) < 20:
+            return "NEUTRAL"
+
+        close      = float(valid["Close"].iloc[-1])
+        ema50_now  = float(valid["ema50"].iloc[-1])
+        ema50_prev = float(valid["ema50"].iloc[-10])
+        if ema50_prev <= 0:
+            return "NEUTRAL"
+
+        slope_pct = (ema50_now - ema50_prev) / ema50_prev  # log-pct change
+
+        # 0.015% over 10 bars ≈ 0.6% per hour: meaningful directional move
+        SLOPE_THRESH = 0.00015
+
+        if close > ema50_now and slope_pct >  SLOPE_THRESH:
+            return "BULL"
+        if close < ema50_now and slope_pct < -SLOPE_THRESH:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def check_liquidity_sweep(self, df: pd.DataFrame, direction: str) -> bool:
+        """
+        Detect a liquidity sweep — institutional pattern of stop-hunt + reversal.
+
+          LONG  sweep: previous bar's Low pierced the 10-bar swing low,
+                       current bar closed back ABOVE that swing low.
+          SHORT sweep: previous bar's High pierced the 10-bar swing high,
+                       current bar closed back BELOW that swing high.
+
+        These are A+ counter-trend reversals (or trend continuations after
+        retail stops are cleared).
+        """
+        if len(df) < 12:
+            return False
+        recent = df.tail(12)
+        prior  = recent.iloc[:-2]    # 10 bars before the last 2
+        sweep_bar   = recent.iloc[-2]
+        confirm_bar = recent.iloc[-1]
+
+        if direction == "LONG":
+            swing_low = float(prior["Low"].min())
+            return (float(sweep_bar["Low"])   <  swing_low and
+                    float(confirm_bar["Close"]) >  swing_low and
+                    float(confirm_bar["Close"]) >  float(confirm_bar["Open"]))
+
+        if direction == "SHORT":
+            swing_high = float(prior["High"].max())
+            return (float(sweep_bar["High"])  >  swing_high and
+                    float(confirm_bar["Close"]) <  swing_high and
+                    float(confirm_bar["Close"]) <  float(confirm_bar["Open"]))
+
+        return False
 
     def _count_vwap_crossings(self, df: pd.DataFrame) -> int:
         """Count VWAP crossings in the last VWAP_CHOP_WINDOW bars."""
@@ -822,13 +884,29 @@ class AfternoonVWAP(VWAPTrendPullback):
 
 class MultiSessionStrategy:
     """
-    Combines three strategies in priority order each bar:
-      1. ORB        (9:45–10:15) — opening range breakout, fires once/day
-      2. MorningVWAP (9:45–11:30) — VWAP pullback with OR confirmation
-      3. AfternoonVWAP (13:00–15:45) — VWAP pullback, no OR requirement
+    Elite multi-session strategy combining three sub-strategies, then layering:
+      • EMA50 trend filter (hard requirement except for liquidity sweeps)
+      • Liquidity sweep detection (institutional reversal pattern)
+      • Confluence scoring → A+/A/B/C grades
+      • Adaptive 3R targets on A+ setups
+      • Grade-based contract sizing (B = 60% size, C = rejected)
 
-    Opening range state is computed once by _morning and shared to the others.
+    Sub-strategies (priority order each bar):
+      1. ORB           (9:45–10:15) — opening range breakout, fires once/day
+      2. MorningVWAP   (9:45–11:30) — VWAP pullback with OR confirmation
+      3. AfternoonVWAP (13:00–15:45) — VWAP pullback, no OR requirement
     """
+
+    # Confluence factor weights — applied after sub-strategy fires
+    # Score = factors present.  Min trade: score >= 3 (B grade).
+    GRADE_THRESHOLDS = {
+        "A+": 5,   # 5+ confluence factors — full size + 3R target
+        "A":  4,   # 4 factors — full size, 2R target
+        "B":  3,   # 3 factors — 60% size, 2R target
+        # < 3      — rejected entirely
+    }
+    B_SIZE_MULTIPLIER = 0.6        # B-grade trades use 60% of computed contracts
+    A_PLUS_TARGET_R    = 3.0       # A+ setups extend to 3R
 
     def __init__(self):
         self._morning   = VWAPTrendPullback()
@@ -848,6 +926,126 @@ class MultiSessionStrategy:
         self._afternoon._or_date = self._morning._or_date
         return df
 
+    def _score_setup(
+        self,
+        sig: dict,
+        df: pd.DataFrame,
+        trend: str,
+        has_sweep: bool,
+    ) -> tuple[int, list[str]]:
+        """
+        Score a signal by counting confluence factors.
+        Returns (score, list_of_factor_names).
+        """
+        factors: list[str] = ["strategy_fired"]   # base factor: signal exists
+        direction = sig["direction"]
+
+        # 1. Trend alignment
+        if (direction == "LONG"  and trend == "BULL") or \
+           (direction == "SHORT" and trend == "BEAR"):
+            factors.append("trend_aligned")
+
+        # 2. Liquidity sweep (weighted +2 — highest-conviction institutional pattern)
+        if has_sweep:
+            factors.append("liquidity_sweep")
+            factors.append("sweep_quality_bonus")
+
+        # 3. Strong volume (1.2× 20-bar average — above the entry-filter minimum)
+        valid_v = df.dropna(subset=["Volume"]).tail(21)
+        if len(valid_v) >= 21:
+            cur_vol = float(valid_v["Volume"].iloc[-1])
+            avg_vol = float(valid_v["Volume"].iloc[:-1].mean())
+            if avg_vol > 0 and cur_vol >= 1.2 * avg_vol:
+                factors.append("strong_volume")
+
+        # 4. RSI in sweet spot
+        rsi = sig.get("rsi", None)
+        if rsi is None and "rsi14" in df.columns:
+            v = df["rsi14"].dropna()
+            if len(v):
+                rsi = float(v.iloc[-1])
+        if rsi is not None:
+            # LONG sweet spot 38–58 (pulled back to value, room to run up)
+            # SHORT sweet spot 42–62 (bounced to value, room to fall)
+            sweet = (38 <= rsi <= 58) if direction == "LONG" else (42 <= rsi <= 62)
+            if sweet:
+                factors.append("rsi_sweet_spot")
+
+        # 5. ATR not at cap (means raw ATR is in normal range, not extreme volatility)
+        atr     = sig.get("atr", 0.0)
+        raw_atr = sig.get("raw_atr", 0.0)
+        if raw_atr > 0 and atr > 0 and raw_atr <= atr * 1.05:
+            factors.append("atr_normal")
+
+        return len(factors), factors
+
+    def _grade(self, score: int) -> str:
+        if score >= self.GRADE_THRESHOLDS["A+"]:
+            return "A+"
+        if score >= self.GRADE_THRESHOLDS["A"]:
+            return "A"
+        if score >= self.GRADE_THRESHOLDS["B"]:
+            return "B"
+        return "C"
+
+    def _enrich_and_filter(
+        self,
+        sig: dict | None,
+        df: pd.DataFrame,
+    ) -> dict | None:
+        """Apply trend filter + grading + adaptive target + size adjustment."""
+        if sig is None:
+            return None
+
+        trend     = self._morning.compute_trend(df)
+        has_sweep = self._morning.check_liquidity_sweep(df, sig["direction"])
+
+        # Hard filter: must be trend-aligned OR a liquidity sweep
+        direction_ok = has_sweep or \
+            (sig["direction"] == "LONG"  and trend == "BULL") or \
+            (sig["direction"] == "SHORT" and trend == "BEAR")
+        if not direction_ok:
+            return None
+
+        score, factors = self._score_setup(sig, df, trend, has_sweep)
+        grade = self._grade(score)
+
+        # Reject C-grade trades (insufficient confluence)
+        if grade == "C":
+            return None
+
+        sig["grade"]   = grade
+        sig["score"]   = score
+        sig["factors"] = factors
+        sig["trend"]   = trend
+        sig["has_sweep"] = has_sweep
+
+        # A+ setups: extend target to 3R (capture more on highest-quality entries)
+        if grade == "A+":
+            stop_dist = sig.get("stop_distance", 0.0)
+            if stop_dist > 0:
+                if sig["direction"] == "LONG":
+                    sig["target"] = round(sig["price"] + self.A_PLUS_TARGET_R * stop_dist, 2)
+                else:
+                    sig["target"] = round(sig["price"] - self.A_PLUS_TARGET_R * stop_dist, 2)
+                sig["target_r"] = self.A_PLUS_TARGET_R
+        else:
+            sig["target_r"] = 2.0
+
+        # B-grade trades: reduce position size by 40%
+        if grade == "B":
+            original = sig.get("contracts", 0)
+            scaled   = max(1, int(original * self.B_SIZE_MULTIPLIER))
+            sig["contracts_original"] = original
+            sig["contracts"] = scaled
+            # Update risk_actual to reflect the new size
+            if sig.get("stop_distance", 0) > 0:
+                sig["risk_actual"] = round(
+                    scaled * sig["stop_distance"] * 10 * 5, 2
+                )
+
+        return sig
+
     def generate_signals(
         self,
         df: pd.DataFrame,
@@ -859,6 +1057,7 @@ class MultiSessionStrategy:
     ) -> dict | None:
         # 1. ORB — highest priority during 9:45–10:15 window
         sig = self._orb.generate_signals(df, time_et, current_equity, peak_equity)
+        sig = self._enrich_and_filter(sig, df)
         if sig is not None:
             return sig
 
@@ -869,16 +1068,18 @@ class MultiSessionStrategy:
             current_equity=current_equity,
             peak_equity=peak_equity,
         )
+        sig = self._enrich_and_filter(sig, df)
         if sig is not None:
             return sig
 
         # 3. Afternoon VWAP pullback
-        return self._afternoon.generate_signals(
+        sig = self._afternoon.generate_signals(
             df, time_et, trades_today,
             daily_pnl=daily_pnl,
             current_equity=current_equity,
             peak_equity=peak_equity,
         )
+        return self._enrich_and_filter(sig, df)
 
     def evaluate_signal_state(self, df: pd.DataFrame) -> dict | None:
         return self._morning.evaluate_signal_state(df)
