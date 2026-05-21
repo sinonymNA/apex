@@ -8,14 +8,23 @@ This isolation makes unit testing trivial.
 from datetime import datetime, time
 import pytz
 
-# ── Hardcoded constants — DO NOT OVERRIDE AT RUNTIME ─────────────────────────
-MAX_DAILY_LOSS = -500           # Phase 1 default; overridden by get_phase_limits() per trade
-TRAILING_DD_LIMIT = -2000       # Kill switch if drawdown from peak exceeds this
-MAX_CONTRACTS = 1               # SPY paper account proxy shares (real size controlled by MES contracts)
-MAX_TRADES_PER_DAY = 4          # Hard cap on trades per session
-NEWS_BLACKOUT_PRE_MIN = 5       # Minutes before known news event to block entry
-NEWS_BLACKOUT_POST_MIN = 8      # Minutes after known news event to block entry
-KILL_CONSECUTIVE_LOSSES = 3     # Pause if this many losses in a row
+# ── Funded account parameters ─────────────────────────────────────────────────
+# Calibrated for a standard Apex/TopStep MES evaluation account:
+#   Profit target:   $3,000 (evaluation passes when cumulative P&L reaches this)
+#   Trailing DD:     $1,700 (broker blows the account if equity drops this far from peak)
+#   Consistency:     20%    (no single day's profit > 20% of total at evaluation end)
+FUNDED_PROFIT_TARGET = 3_000.0   # stop trading and withdraw when eval_pnl >= this
+FUNDED_TRAILING_DD   = 1_700.0   # broker's hard limit (informational — we stop earlier)
+CONSISTENCY_LIMIT    = 0.19      # 19% cap per day (one point under the 20% broker rule)
+
+# ── Kill switch constants — DO NOT OVERRIDE AT RUNTIME ───────────────────────
+MAX_DAILY_LOSS     = -500        # Phase 1 default; overridden by get_phase_limits() per trade
+TRAILING_DD_LIMIT  = -1_500      # Our kill switch: $200 safety buffer inside the $1,700 funded limit
+MAX_CONTRACTS      = 1           # SPY paper proxy shares (MES size controlled per-signal)
+MAX_TRADES_PER_DAY = 4           # Hard cap on trades per session
+NEWS_BLACKOUT_PRE_MIN  = 5       # Minutes before known news event to block entry
+NEWS_BLACKOUT_POST_MIN = 8       # Minutes after known news event to block entry
+KILL_CONSECUTIVE_LOSSES = 3      # Pause if this many losses in a row
 
 ET = pytz.timezone("America/New_York")
 
@@ -38,12 +47,20 @@ def get_phase_limits(eval_pnl: float) -> dict:
     """
     Return risk limits for the current eval phase based on cumulative P&L.
 
+    Phased against a $3,000 funded account profit target:
+      Phase 1 ($0–$1,000):    full risk, $500/day cap  = 16.7% of target  ✓ consistency
+      Phase 2 ($1,000–$2,400): reduced risk, $400/day  = 13.3%  ✓
+      Phase 3 ($2,400–$3,000): conservative, $300/day  = 10.0%  ✓  (final stretch)
+
+    All daily profit caps are below 19% of FUNDED_PROFIT_TARGET, satisfying the
+    20% consistency rule even if evaluation ends at the minimum passing total.
+
     Returns:
         {"phase": int, "max_risk": float, "daily_loss": float, "daily_profit_target": float}
     """
-    if eval_pnl >= 2200:
+    if eval_pnl >= 2_400:
         return {"phase": 3, "max_risk": 150.0, "daily_loss": -300.0, "daily_profit_target": 300.0}
-    elif eval_pnl >= 1000:
+    elif eval_pnl >= 1_000:
         return {"phase": 2, "max_risk": 200.0, "daily_loss": -400.0, "daily_profit_target": 400.0}
     else:
         return {"phase": 1, "max_risk": 250.0, "daily_loss": -500.0, "daily_profit_target": 500.0}
@@ -98,6 +115,10 @@ def pre_trade_check(
     Returns:
         {"approved": bool, "reason": str}
     """
+    # 0. Evaluation complete — stop all trading immediately
+    if eval_pnl >= FUNDED_PROFIT_TARGET:
+        return {"approved": False, "reason": f"EVALUATION PASSED — ${eval_pnl:.0f} >= ${FUNDED_PROFIT_TARGET:.0f} target. Stop trading and withdraw!"}
+
     # 1. Phase-based daily loss limit and profit target
     phase_limits = get_phase_limits(eval_pnl)
     daily_limit  = phase_limits["daily_loss"]
@@ -106,6 +127,12 @@ def pre_trade_check(
         return {"approved": False, "reason": f"Daily loss limit reached (${daily_pnl:.0f} <= ${daily_limit:.0f}, Phase {phase_limits['phase']})"}
     if daily_pnl >= daily_target:
         return {"approved": False, "reason": f"Daily profit target reached (${daily_pnl:.0f} >= ${daily_target:.0f}, Phase {phase_limits['phase']}) — locking in the day"}
+
+    # 1b. Consistency rule — daily profit cap is 19% of funded target ($570)
+    # Ensures no single day ever exceeds 20% of the $3,000 evaluation profit total
+    consistency_cap = FUNDED_PROFIT_TARGET * CONSISTENCY_LIMIT  # $570
+    if daily_pnl >= consistency_cap:
+        return {"approved": False, "reason": f"Consistency cap: ${daily_pnl:.0f} >= ${consistency_cap:.0f} (19% of ${FUNDED_PROFIT_TARGET:.0f} target)"}
 
     # 2. Max trades per day
     if trade_count >= MAX_TRADES_PER_DAY:
