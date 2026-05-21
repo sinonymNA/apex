@@ -223,6 +223,7 @@ def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
                 daily_pnl=day_pnl,
                 current_equity=equity,
                 peak_equity=peak_equity,
+                eval_pnl=eval_pnl,
             )
         except Exception:
             continue
@@ -288,7 +289,7 @@ LABELS = {
     "orb_short":     "ORB short break",
 }
 
-equity      = 10_000.0
+equity      = 50_000.0
 peak_equity = equity
 cumulative  = 0.0
 all_trades  = []
@@ -297,14 +298,12 @@ daily_pnls  = []
 W = 80
 print("═" * W)
 print(f"{'  7-DAY MES SIMULATION  —  Calibrated Synthetic SPY':^{W}}")
-print(f"{'  $10K account  |  1 MES = $5/pt  |  SPY×10=ES pts  |  shorts enabled':^{W}}")
+print(f"{'  $50K account  |  1 MES = $5/pt  |  SPY×10=ES pts  |  5× sizing  |  shorts enabled':^{W}}")
 print("═" * W)
 
 for label, scenario, seed in WEEK:
-    # Use previous day close as base price (accounts carry over)
-    day_base = equity / 10_000.0 * BASE if equity > 0 else BASE
-    df  = make_day(scenario, base_price=day_base, seed=seed)
-    res = simulate_day(df, scenario, equity, peak_equity, equity - 10_000.0)
+    df  = make_day(scenario, base_price=BASE, seed=seed)
+    res = simulate_day(df, scenario, equity, peak_equity, equity - 50_000.0)
 
     equity      = res["equity"]
     peak_equity = res["peak"]
@@ -344,7 +343,7 @@ worst_day = min(daily_pnls) if daily_pnls else 0
 print(f"\n{'═' * W}")
 print(f"{'  SIMULATION SUMMARY':^{W}}")
 print(f"{'═' * W}")
-print(f"  Starting equity      : $10,000")
+print(f"  Starting equity      : $50,000")
 print(f"  Ending equity        : ${equity:>10,.2f}")
 print(f"  7-day net P&L        : ${cumulative:>+10.2f}")
 print(f"  Best day             : ${best_day:>+.0f}")
@@ -397,13 +396,13 @@ if total:
 else:
     print("  Total trades         : 0  (no signals generated)")
 
-ret_7d    = (equity / 10_000.0 - 1) * 100
+ret_7d    = (equity / 50_000.0 - 1) * 100
 ret_month = ret_7d * (21.0 / 7.0)
 ret_year  = ((1 + ret_month / 100) ** 12 - 1) * 100
 
 print(f"\n  ── Projections (linear scale-out) ──")
 print(f"    7-day return       : {ret_7d:>+.2f}%")
-print(f"    Monthly (×3)       : {ret_month:>+.1f}%  on $10K = ${10_000 * ret_month / 100:>+.0f}/mo")
+print(f"    Monthly (×3)       : {ret_month:>+.1f}%  on $50K = ${50_000 * ret_month / 100:>+.0f}/mo")
 print(f"    Annual (compounded): {ret_year:>+.1f}%")
 print("═" * W)
 print()

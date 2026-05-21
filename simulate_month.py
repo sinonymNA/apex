@@ -73,7 +73,7 @@ def fmt_money(x: float) -> str:
 
 
 def main():
-    equity      = 10_000.0
+    equity      = 50_000.0
     peak_equity = equity
     eval_pnl    = 0.0     # cumulative for funded account tracker
     all_trades  = []
@@ -85,8 +85,8 @@ def main():
     W = 92
     print("═" * W)
     print(f"{'  21-DAY (1 MONTH) FUNDED ACCOUNT SIMULATION':^{W}}")
-    print(f"{'  Target: +$3,000  |  Trailing DD limit: -$1,700  |  Consistency cap: $570/day':^{W}}")
-    print(f"{'  $10K paper equity  |  MES = $5/pt  |  SPY×10 proxy  |  shorts enabled':^{W}}")
+    print(f"{'  Target: +$3,000  |  Trailing DD limit: -$2,500  |  Consistency cap: $570/day':^{W}}")
+    print(f"{'  $50K paper equity  |  MES = $5/pt  |  SPY×10 proxy  |  5× sizing  |  shorts enabled':^{W}}")
     print("═" * W)
     print()
     print(f"  {'Day':<8} {'Scenario':<16} {'Trades':>6} {'Day P&L':>10} {'Eval P&L':>10} {'Equity':>10}  Status")
@@ -107,8 +107,7 @@ def main():
         if eval_pnl >= 3_000 and target_hit_day is None:
             target_hit_day = label
             status.append("TARGET HIT!")
-        if eval_pnl - peak_equity + 10_000 <= -1_700 and blow_day is None:
-            # equivalent: eval drawdown from peak exceeds funded $1,700
+        if equity - peak_equity <= -2_500 and blow_day is None:
             blow_day = label
             status.append("DD BREACH")
         if day_pnl >= 570:
@@ -152,10 +151,10 @@ def main():
     print("═" * W)
     print(f"{'  MONTH SUMMARY':^{W}}")
     print("═" * W)
-    print(f"  Starting equity         : $10,000")
+    print(f"  Starting equity         : $50,000")
     print(f"  Ending equity           : ${equity:>10,.2f}")
     print(f"  Net P&L (21 days)       : {fmt_money(eval_pnl):>12}")
-    print(f"  Max drawdown (peak→tro) : {fmt_money(max_dd):>12}  (funded limit: -$1,700)")
+    print(f"  Max drawdown (peak→tro) : {fmt_money(max_dd):>12}  (funded limit: -$2,500)")
     print(f"  Best day                : {fmt_money(best_day):>12}")
     print(f"  Worst day               : {fmt_money(worst_day):>12}")
     print(f"  Up days                 : {pos_days:>3}  |  Down days: {neg_days:>3}  |  Flat: {flat_days:>3}")

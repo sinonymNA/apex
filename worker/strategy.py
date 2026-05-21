@@ -75,7 +75,7 @@ class VWAPTrendPullback:
     MAX_HOLD_MINUTES = 90  # max hold time in minutes
 
     MES_POINT_VALUE = 5.0
-    MES_MAX_CONTRACTS = 5
+    MES_MAX_CONTRACTS = 10
     ES_POINT_VALUE = 50.0
     ES_MAX_CONTRACTS = 1
 
@@ -252,12 +252,12 @@ class VWAPTrendPullback:
 
     def _get_phase_risk(self, eval_pnl: float) -> tuple[int, float]:
         """Return (phase_number, max_risk_dollars) based on cumulative eval P&L."""
-        if eval_pnl >= 2200:
-            return 3, 150.0
-        elif eval_pnl >= 1000:
-            return 2, 200.0
+        if eval_pnl >= 2_400:
+            return 3, 750.0
+        elif eval_pnl >= 1_000:
+            return 2, 1_000.0
         else:
-            return 1, 250.0
+            return 1, 1_250.0
 
     def _apply_drawdown_gate(
         self, max_risk: float, current_equity: float, peak_equity: float
@@ -265,15 +265,16 @@ class VWAPTrendPullback:
         """
         Apply trailing drawdown gates.
         Returns adjusted max_risk, or None to block trading.
+        Calibrated for $50K Apex account ($2,500 trailing DD limit).
         """
-        dd_line = peak_equity - 2000.0
+        dd_line = peak_equity - 2_500.0
         distance = current_equity - dd_line
-        if distance < 600:
+        if distance < 750:
             return None
-        elif distance < 1000:
-            return min(max_risk, 150.0)
-        elif distance < 1500:
-            return min(max_risk, 200.0)
+        elif distance < 1_250:
+            return min(max_risk, 750.0)
+        elif distance < 1_875:
+            return min(max_risk, 1_000.0)
         return max_risk
 
     def _size_contracts(
@@ -380,8 +381,9 @@ class VWAPTrendPullback:
         time_et: datetime,
         trades_today: int,
         daily_pnl: float = 0.0,
-        current_equity: float = 100_000.0,
-        peak_equity: float = 100_000.0,
+        current_equity: float = 50_000.0,
+        peak_equity: float = 50_000.0,
+        eval_pnl: float = 0.0,
     ) -> dict | None:
         """
         Evaluate last two bars for a VWAP pullback entry signal.
@@ -432,7 +434,6 @@ class VWAPTrendPullback:
             return None
 
         # Phase + drawdown-gated risk
-        eval_pnl = current_equity - 100_000.0
         phase, max_risk = self._get_phase_risk(eval_pnl)
         max_risk = self._apply_drawdown_gate(max_risk, current_equity, peak_equity)
         if max_risk is None:
@@ -589,7 +590,7 @@ class OpeningRangeBreakout:
     STOP_BUFFER     = 0.03    # SPY pts beyond OR boundary for stop placement
 
     MES_POINT_VALUE   = 5.0
-    MES_MAX_CONTRACTS = 5
+    MES_MAX_CONTRACTS = 10
 
     def __init__(self):
         self._fired_today: Optional[date] = None
@@ -611,8 +612,9 @@ class OpeningRangeBreakout:
         self,
         df: pd.DataFrame,
         time_et: datetime,
-        current_equity: float = 100_000.0,
-        peak_equity: float = 100_000.0,
+        current_equity: float = 50_000.0,
+        peak_equity: float = 50_000.0,
+        eval_pnl: float = 0.0,
     ) -> dict | None:
         t = time_et.time() if hasattr(time_et, "time") else time_et
         if not (self.ENTRY_START <= t < self.ENTRY_END):
@@ -652,23 +654,22 @@ class OpeningRangeBreakout:
             return None
 
         # Phase-based sizing (inline — no inheritance required)
-        eval_pnl = current_equity - 100_000.0
-        if eval_pnl >= 2200:
-            phase, max_risk = 3, 150.0
-        elif eval_pnl >= 1000:
-            phase, max_risk = 2, 200.0
+        if eval_pnl >= 2_400:
+            phase, max_risk = 3, 750.0
+        elif eval_pnl >= 1_000:
+            phase, max_risk = 2, 1_000.0
         else:
-            phase, max_risk = 1, 250.0
+            phase, max_risk = 1, 1_250.0
 
         # Trailing drawdown gate (mirrors VWAPTrendPullback._apply_drawdown_gate)
-        dd_line  = peak_equity - 2000.0
+        dd_line  = peak_equity - 2_500.0
         distance = current_equity - dd_line
-        if distance < 600:
+        if distance < 750:
             return None
-        elif distance < 1000:
-            max_risk = min(max_risk, 150.0)
-        elif distance < 1500:
-            max_risk = min(max_risk, 200.0)
+        elif distance < 1_250:
+            max_risk = min(max_risk, 750.0)
+        elif distance < 1_875:
+            max_risk = min(max_risk, 1_000.0)
 
         def _size(stop_dist: float) -> tuple[int, float]:
             es_pts   = stop_dist * 10
@@ -765,8 +766,9 @@ class AfternoonVWAP(VWAPTrendPullback):
         time_et: datetime,
         trades_today: int,
         daily_pnl: float = 0.0,
-        current_equity: float = 100_000.0,
-        peak_equity: float = 100_000.0,
+        current_equity: float = 50_000.0,
+        peak_equity: float = 50_000.0,
+        eval_pnl: float = 0.0,
     ) -> dict | None:
         t = time_et.time() if hasattr(time_et, "time") else time_et
         if not (self.ENTRY_START <= t < self.ENTRY_END):
@@ -806,7 +808,6 @@ class AfternoonVWAP(VWAPTrendPullback):
         if not ok:
             return None
 
-        eval_pnl = current_equity - 100_000.0
         phase, max_risk = self._get_phase_risk(eval_pnl)
         max_risk = self._apply_drawdown_gate(max_risk, current_equity, peak_equity)
         if max_risk is None:
@@ -1052,11 +1053,12 @@ class MultiSessionStrategy:
         time_et: datetime,
         trades_today: int,
         daily_pnl: float = 0.0,
-        current_equity: float = 100_000.0,
-        peak_equity: float = 100_000.0,
+        current_equity: float = 50_000.0,
+        peak_equity: float = 50_000.0,
+        eval_pnl: float = 0.0,
     ) -> dict | None:
         # 1. ORB — highest priority during 9:45–10:15 window
-        sig = self._orb.generate_signals(df, time_et, current_equity, peak_equity)
+        sig = self._orb.generate_signals(df, time_et, current_equity, peak_equity, eval_pnl)
         sig = self._enrich_and_filter(sig, df)
         if sig is not None:
             return sig
@@ -1067,6 +1069,7 @@ class MultiSessionStrategy:
             daily_pnl=daily_pnl,
             current_equity=current_equity,
             peak_equity=peak_equity,
+            eval_pnl=eval_pnl,
         )
         sig = self._enrich_and_filter(sig, df)
         if sig is not None:
@@ -1078,6 +1081,7 @@ class MultiSessionStrategy:
             daily_pnl=daily_pnl,
             current_equity=current_equity,
             peak_equity=peak_equity,
+            eval_pnl=eval_pnl,
         )
         return self._enrich_and_filter(sig, df)
 
