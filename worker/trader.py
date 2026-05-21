@@ -38,7 +38,7 @@ SYMBOL = "SPY"              # Alpaca paper account symbol (proxy tracking only)
 ES_DATA_SYMBOL = "ES=F"    # yfinance symbol for ES monitoring
 ES_POINT_VALUE = 50.0      # USD per point for E-mini S&P 500
 MES_POINT_VALUE = 5.0      # USD per point for Micro E-mini S&P 500
-MES_MAX_CONTRACTS = 5      # max MES contracts per trade
+MES_MAX_CONTRACTS = 10     # max MES contracts per trade ($50K Tradeify account)
 ES_CONTRACTS = 1           # ES contracts cap (MES sizing handled per-signal)
 TRADERSPOST_TICKER = "MESM2026"  # MES June 2026 front month
 PAPER = True
@@ -64,8 +64,8 @@ _state = {
     "trade_count": 0,
     "consecutive_losses": 0,
     "consecutive_wins": 0,
-    "peak_equity": 100_000.0,
-    "current_equity": 100_000.0,
+    "peak_equity": 50_000.0,
+    "current_equity": 50_000.0,
     "current_position": None,   # dict or None
     "is_paused": False,
     "kill_switch_active": False,
@@ -586,7 +586,7 @@ def _close_position(reason: str, exit_price: float):
             "stop_hit": "Stop hit", "target_hit": "Target hit",
             "max_hold_exceeded": "Time exit", "end_of_day": "EOD close",
         }
-        running_pnl = _state["current_equity"] - 100_000.0
+        running_pnl = _state["current_equity"] - 50_000.0
         _db.post_trade_exit(
             pnl=pnl_dollars,
             entry=entry_price,
@@ -602,7 +602,7 @@ def _close_position(reason: str, exit_price: float):
     # Milestone check
     try:
         import discord_bot as _db
-        _db.check_milestones(_state["current_equity"] - 100_000.0)
+        _db.check_milestones(_state["current_equity"] - 50_000.0)
     except Exception as _e:
         logger.warning(f"Milestone check failed: {_e}")
 
@@ -753,7 +753,7 @@ def five_min_bar_job():
         _state["regime"] = regime
 
     # ── Signal generation ─────────────────────────────────────────────────────
-    eval_pnl = _state["current_equity"] - 100_000.0
+    eval_pnl = _state["current_equity"] - 50_000.0
     signal = _strategy.generate_signals(
         df, now_et, _state["trade_count"],
         daily_pnl=_state["daily_pnl"],
@@ -897,7 +897,7 @@ def five_min_bar_job():
     )
     try:
         import discord_bot as _db
-        running_pnl = _state["current_equity"] - 100_000.0
+        running_pnl = _state["current_equity"] - 50_000.0
         _db.post_trade_entry(
             price=signal["price"],
             stop=signal["stop"],
@@ -1157,7 +1157,7 @@ def discord_summary_job():
         wins = [t for t in today_trades if (t.get("pnl_dollars") or 0) > 0]
         losses = [t for t in today_trades if (t.get("pnl_dollars") or 0) <= 0]
         daily_pnl = _state["daily_pnl"]
-        total_pnl = _state["current_equity"] - 100_000.0
+        total_pnl = _state["current_equity"] - 50_000.0
         buffer = max(0.0, 1500 + daily_pnl)
 
         assessment = "System ran as expected. Stay focused on the process."
