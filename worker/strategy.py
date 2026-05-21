@@ -65,7 +65,7 @@ class VWAPTrendPullback:
     TARGET_R = 2.0         # reward:risk ratio
 
     ATR_MIN = 0.10         # SPY-point floor for ATR
-    ATR_MAX = 0.50         # SPY-point cap for ATR
+    ATR_MAX = 0.80         # SPY-point cap for ATR
 
     VWAP_CHOP_WINDOW = 30  # bars to look back for chop detection
     VWAP_CHOP_MAX = 3      # max VWAP crossings before blocking entry
@@ -372,6 +372,7 @@ class VWAPTrendPullback:
                     if n >= 1:
                         return {
                             **base,
+                            "strategy": "MorningVWAP",
                             "signal": "BUY",
                             "direction": "LONG",
                             "price": close,
@@ -396,6 +397,7 @@ class VWAPTrendPullback:
                     if n >= 1:
                         return {
                             **base,
+                            "strategy": "MorningVWAP",
                             "signal": "SELL",
                             "direction": "SHORT",
                             "price": close,
@@ -468,3 +470,377 @@ class VWAPTrendPullback:
                 (or_short_ok and not above_vwap and not ema_bullish)
             ),
         }
+
+
+class OpeningRangeBreakout:
+    """
+    Opening Range Breakout — first directional move out of the 9:30–9:45 OR.
+    Entry window: 9:45–10:15 AM ET. Fires at most once per session.
+    Stop = opposite OR extreme + buffer. Target = 2× stop distance.
+    Volume confirmation: current bar >= 1.15× 20-bar average volume.
+    """
+
+    OR_END          = time(9, 45)
+    ENTRY_START     = time(9, 45)
+    ENTRY_END       = time(10, 15)
+
+    MIN_OR_RANGE    = 0.15    # filter dead opens (SPY pts)
+    MAX_OR_RANGE    = 1.80    # filter chaotic opens
+    VOL_MULTIPLIER  = 1.15    # volume confirmation threshold
+    TARGET_R        = 2.0
+    STOP_BUFFER     = 0.03    # SPY pts beyond OR boundary for stop placement
+
+    MES_POINT_VALUE   = 5.0
+    MES_MAX_CONTRACTS = 5
+
+    def __init__(self):
+        self._fired_today: Optional[date] = None
+        self._or_high: Optional[float] = None
+        self._or_low: Optional[float] = None
+        self._or_date: Optional[date] = None
+
+    def sync_or(
+        self,
+        or_high: Optional[float],
+        or_low: Optional[float],
+        or_date: Optional[date],
+    ) -> None:
+        self._or_high = or_high
+        self._or_low = or_low
+        self._or_date = or_date
+
+    def generate_signals(
+        self,
+        df: pd.DataFrame,
+        time_et: datetime,
+        current_equity: float = 100_000.0,
+        peak_equity: float = 100_000.0,
+    ) -> dict | None:
+        t = time_et.time() if hasattr(time_et, "time") else time_et
+        if not (self.ENTRY_START <= t < self.ENTRY_END):
+            return None
+
+        today = time_et.date() if hasattr(time_et, "date") else date.today()
+        if self._fired_today == today:
+            return None
+
+        if self._or_high is None or self._or_low is None:
+            return None
+
+        or_range = self._or_high - self._or_low
+        if not (self.MIN_OR_RANGE <= or_range <= self.MAX_OR_RANGE):
+            return None
+
+        required = {"Open", "High", "Low", "Close", "Volume", "vwap", "ema9", "ema21", "atr14"}
+        if not required.issubset(df.columns):
+            return None
+
+        valid = df.dropna(subset=["vwap", "ema9", "ema21", "atr14"])
+        if len(valid) < 20:
+            return None
+
+        current = valid.iloc[-1]
+        close   = float(current["Close"])
+        vwap    = float(current["vwap"])
+        ema9    = float(current["ema9"])
+        ema21   = float(current["ema21"])
+        volume  = float(current["Volume"])
+        raw_atr = float(current["atr14"])
+        avg_vol = float(valid["Volume"].tail(20).mean())
+
+        if np.isnan(raw_atr) or raw_atr <= 0:
+            return None
+        if avg_vol > 0 and volume < self.VOL_MULTIPLIER * avg_vol:
+            return None
+
+        # Phase-based sizing (inline — no inheritance required)
+        eval_pnl = current_equity - 100_000.0
+        if eval_pnl >= 2200:
+            phase, max_risk = 3, 150.0
+        elif eval_pnl >= 1000:
+            phase, max_risk = 2, 200.0
+        else:
+            phase, max_risk = 1, 250.0
+
+        # Trailing drawdown gate (mirrors VWAPTrendPullback._apply_drawdown_gate)
+        dd_line  = peak_equity - 2000.0
+        distance = current_equity - dd_line
+        if distance < 600:
+            return None
+        elif distance < 1000:
+            max_risk = min(max_risk, 150.0)
+        elif distance < 1500:
+            max_risk = min(max_risk, 200.0)
+
+        def _size(stop_dist: float) -> tuple[int, float]:
+            es_pts   = stop_dist * 10
+            risk_per = es_pts * self.MES_POINT_VALUE
+            if risk_per <= 0:
+                return 0, 0.0
+            n = min(self.MES_MAX_CONTRACTS, math.floor(max_risk / risk_per))
+            return n, n * risk_per
+
+        vol_ratio = round(volume / avg_vol, 2) if avg_vol > 0 else 0.0
+
+        base = {
+            "strategy":       "ORB",
+            "atr":            round(raw_atr, 6),
+            "raw_atr":        round(raw_atr, 6),
+            "phase":          phase,
+            "max_risk":       max_risk,
+            "or_high":        self._or_high,
+            "or_low":         self._or_low,
+            "vwap":           round(vwap, 2),
+            "ema9":           round(ema9, 2),
+            "ema21":          round(ema21, 2),
+            "vwap_crossings": 0,
+            "pullback_high":  close,
+            "pullback_low":   close,
+            "volume_ratio":   vol_ratio,
+            "or_range":       round(or_range, 4),
+        }
+
+        # LONG breakout
+        if close > self._or_high:
+            stop      = round(self._or_low - self.STOP_BUFFER, 2)
+            stop_dist = close - stop
+            if stop_dist > 0:
+                target           = round(close + self.TARGET_R * stop_dist, 2)
+                n, risk_actual   = _size(stop_dist)
+                if n >= 1:
+                    self._fired_today = today
+                    return {
+                        **base,
+                        "signal":        "BUY",
+                        "direction":     "LONG",
+                        "price":         close,
+                        "stop":          stop,
+                        "target":        target,
+                        "stop_distance": round(stop_dist, 4),
+                        "contracts":     n,
+                        "risk_actual":   round(risk_actual, 2),
+                    }
+
+        # SHORT breakout
+        if close < self._or_low:
+            stop      = round(self._or_high + self.STOP_BUFFER, 2)
+            stop_dist = stop - close
+            if stop_dist > 0:
+                target           = round(close - self.TARGET_R * stop_dist, 2)
+                n, risk_actual   = _size(stop_dist)
+                if n >= 1:
+                    self._fired_today = today
+                    return {
+                        **base,
+                        "signal":        "SELL",
+                        "direction":     "SHORT",
+                        "price":         close,
+                        "stop":          stop,
+                        "target":        target,
+                        "stop_distance": round(stop_dist, 4),
+                        "contracts":     n,
+                        "risk_actual":   round(risk_actual, 2),
+                    }
+
+        return None
+
+
+class AfternoonVWAP(VWAPTrendPullback):
+    """
+    Afternoon VWAP trend pullback (1:00–3:45 PM ET).
+    No opening range breakout requirement — relies on VWAP/EMA alignment alone.
+    Tighter chop filter (2 crossings vs 3) to survive midday noise.
+    """
+
+    ENTRY_START      = time(13, 0)
+    ENTRY_END        = time(15, 45)
+
+    STOP_ATR_MIN     = 0.5
+    STOP_ATR_MAX     = 1.2
+    ATR_MAX          = 0.70
+    VWAP_CHOP_WINDOW = 15
+    VWAP_CHOP_MAX    = 2
+
+    def generate_signals(
+        self,
+        df: pd.DataFrame,
+        time_et: datetime,
+        trades_today: int,
+        daily_pnl: float = 0.0,
+        current_equity: float = 100_000.0,
+        peak_equity: float = 100_000.0,
+    ) -> dict | None:
+        t = time_et.time() if hasattr(time_et, "time") else time_et
+        if not (self.ENTRY_START <= t < self.ENTRY_END):
+            return None
+
+        from worker.risk import MAX_TRADES_PER_DAY
+        if trades_today >= MAX_TRADES_PER_DAY:
+            return None
+
+        required_cols = {"vwap", "ema9", "ema21", "atr14", "Open", "High", "Low", "Close", "Volume"}
+        if not required_cols.issubset(df.columns):
+            return None
+
+        valid = df.dropna(subset=["vwap", "ema9", "ema21", "atr14"])
+        if len(valid) < 2:
+            return None
+
+        current = valid.iloc[-1]
+        pullback = valid.iloc[-2]
+
+        close   = float(current["Close"])
+        vwap    = float(current["vwap"])
+        ema9    = float(current["ema9"])
+        ema21   = float(current["ema21"])
+        raw_atr = float(current["atr14"])
+
+        if np.isnan(raw_atr) or raw_atr <= 0:
+            return None
+        effective_atr = max(self.ATR_MIN, min(self.ATR_MAX, raw_atr))
+
+        vwap_crossings = self._count_vwap_crossings(valid)
+        if vwap_crossings > self.VWAP_CHOP_MAX:
+            return None
+
+        eval_pnl = current_equity - 100_000.0
+        phase, max_risk = self._get_phase_risk(eval_pnl)
+        max_risk = self._apply_drawdown_gate(max_risk, current_equity, peak_equity)
+        if max_risk is None:
+            return None
+
+        above_vwap  = close > vwap
+        ema_bullish = ema9 > ema21
+
+        base = {
+            "strategy":       "AfternoonVWAP",
+            "atr":            effective_atr,
+            "raw_atr":        raw_atr,
+            "phase":          phase,
+            "max_risk":       max_risk,
+            "or_high":        self._or_high,
+            "or_low":         self._or_low,
+            "vwap":           round(vwap, 2),
+            "ema9":           round(ema9, 2),
+            "ema21":          round(ema21, 2),
+            "vwap_crossings": vwap_crossings,
+            "pullback_high":  float(pullback["High"]),
+            "pullback_low":   float(pullback["Low"]),
+        }
+
+        # LONG — no OR breakout requirement
+        if above_vwap and ema_bullish:
+            pb = self._check_long_pullback(pullback)
+            if pb is not None and close > pb["high"]:
+                raw_stop  = pb["low"]
+                stop      = max(raw_stop, close - self.STOP_ATR_MAX * effective_atr)
+                stop      = min(stop, close - self.STOP_ATR_MIN * effective_atr)
+                stop_dist = close - stop
+                if stop_dist > 0:
+                    target         = close + self.TARGET_R * stop_dist
+                    n, risk_actual = self._size_contracts(stop_dist, max_risk, "MES")
+                    if n >= 1:
+                        return {
+                            **base,
+                            "signal":        "BUY",
+                            "direction":     "LONG",
+                            "price":         close,
+                            "stop":          round(stop, 2),
+                            "target":        round(target, 2),
+                            "stop_distance": round(stop_dist, 4),
+                            "contracts":     n,
+                            "risk_actual":   round(risk_actual, 2),
+                        }
+
+        # SHORT — no OR breakout requirement
+        if not above_vwap and not ema_bullish:
+            pb = self._check_short_pullback(pullback)
+            if pb is not None and close < pb["low"]:
+                raw_stop  = pb["high"]
+                stop      = min(raw_stop, close + self.STOP_ATR_MAX * effective_atr)
+                stop      = max(stop, close + self.STOP_ATR_MIN * effective_atr)
+                stop_dist = stop - close
+                if stop_dist > 0:
+                    target         = close - self.TARGET_R * stop_dist
+                    n, risk_actual = self._size_contracts(stop_dist, max_risk, "MES")
+                    if n >= 1:
+                        return {
+                            **base,
+                            "signal":        "SELL",
+                            "direction":     "SHORT",
+                            "price":         close,
+                            "stop":          round(stop, 2),
+                            "target":        round(target, 2),
+                            "stop_distance": round(stop_dist, 4),
+                            "contracts":     n,
+                            "risk_actual":   round(risk_actual, 2),
+                        }
+
+        return None
+
+
+class MultiSessionStrategy:
+    """
+    Combines three strategies in priority order each bar:
+      1. ORB        (9:45–10:15) — opening range breakout, fires once/day
+      2. MorningVWAP (9:45–11:30) — VWAP pullback with OR confirmation
+      3. AfternoonVWAP (13:00–15:45) — VWAP pullback, no OR requirement
+
+    Opening range state is computed once by _morning and shared to the others.
+    """
+
+    def __init__(self):
+        self._morning   = VWAPTrendPullback()
+        self._orb       = OpeningRangeBreakout()
+        self._afternoon = AfternoonVWAP()
+
+    @property
+    def MAX_HOLD_MINUTES(self) -> int:
+        return self._morning.MAX_HOLD_MINUTES
+
+    def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = self._morning.compute_indicators(df)
+        self._orb.sync_or(self._morning._or_high, self._morning._or_low, self._morning._or_date)
+        # Share OR state with afternoon strategy too
+        self._afternoon._or_high = self._morning._or_high
+        self._afternoon._or_low  = self._morning._or_low
+        self._afternoon._or_date = self._morning._or_date
+        return df
+
+    def generate_signals(
+        self,
+        df: pd.DataFrame,
+        time_et: datetime,
+        trades_today: int,
+        daily_pnl: float = 0.0,
+        current_equity: float = 100_000.0,
+        peak_equity: float = 100_000.0,
+    ) -> dict | None:
+        # 1. ORB — highest priority during 9:45–10:15 window
+        sig = self._orb.generate_signals(df, time_et, current_equity, peak_equity)
+        if sig is not None:
+            return sig
+
+        # 2. Morning VWAP pullback
+        sig = self._morning.generate_signals(
+            df, time_et, trades_today,
+            daily_pnl=daily_pnl,
+            current_equity=current_equity,
+            peak_equity=peak_equity,
+        )
+        if sig is not None:
+            return sig
+
+        # 3. Afternoon VWAP pullback
+        return self._afternoon.generate_signals(
+            df, time_et, trades_today,
+            daily_pnl=daily_pnl,
+            current_equity=current_equity,
+            peak_equity=peak_equity,
+        )
+
+    def evaluate_signal_state(self, df: pd.DataFrame) -> dict | None:
+        return self._morning.evaluate_signal_state(df)
+
+    def get_levels(self, entry_price: float, atr: float, direction: str = "LONG") -> dict:
+        return self._morning.get_levels(entry_price, atr, direction)

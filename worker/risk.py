@@ -12,10 +12,10 @@ import pytz
 MAX_DAILY_LOSS = -500           # Phase 1 default; overridden by get_phase_limits() per trade
 TRAILING_DD_LIMIT = -2000       # Kill switch if drawdown from peak exceeds this
 MAX_CONTRACTS = 1               # SPY paper account proxy shares (real size controlled by MES contracts)
-MAX_TRADES_PER_DAY = 2          # Hard cap on trades per session
+MAX_TRADES_PER_DAY = 4          # Hard cap on trades per session
 NEWS_BLACKOUT_PRE_MIN = 5       # Minutes before known news event to block entry
 NEWS_BLACKOUT_POST_MIN = 8      # Minutes after known news event to block entry
-KILL_CONSECUTIVE_LOSSES = 2     # Pause if this many losses in a row
+KILL_CONSECUTIVE_LOSSES = 3     # Pause if this many losses in a row
 
 ET = pytz.timezone("America/New_York")
 
@@ -113,9 +113,9 @@ def pre_trade_check(
     if t < time(9, 30):
         return {"approved": False, "reason": f"Too early — market opens at 9:30 AM ET (current: {t.strftime('%H:%M')})"}
 
-    # 4. Time window — after 3:30 PM ET
-    if t >= time(15, 30):
-        return {"approved": False, "reason": f"Too late — no entries after 3:30 PM ET (current: {t.strftime('%H:%M')})"}
+    # 4. Time window — after 3:45 PM ET
+    if t >= time(15, 45):
+        return {"approved": False, "reason": f"Too late — no entries after 3:45 PM ET (current: {t.strftime('%H:%M')})"}
 
     # 5. Consecutive losses kill switch
     if consecutive_losses >= KILL_CONSECUTIVE_LOSSES:

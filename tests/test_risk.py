@@ -180,7 +180,17 @@ class TestTimeBlackout:
         # Should not be blocked by the time check
         assert "early" not in result["reason"].lower()
 
-    def test_blocks_after_3_30pm(self):
+    def test_blocks_after_3_45pm(self):
+        result = pre_trade_check(
+            daily_pnl=0.0,
+            trade_count=0,
+            time_et=make_et(15, 50),
+            consecutive_losses=0,
+        )
+        assert result["approved"] is False
+        assert "late" in result["reason"].lower() or "3:45" in result["reason"]
+
+    def test_blocks_at_exactly_3_45pm(self):
         result = pre_trade_check(
             daily_pnl=0.0,
             trade_count=0,
@@ -188,26 +198,16 @@ class TestTimeBlackout:
             consecutive_losses=0,
         )
         assert result["approved"] is False
-        assert "late" in result["reason"].lower() or "3:30" in result["reason"]
 
-    def test_blocks_at_exactly_3_30pm(self):
+    def test_allows_at_3_44pm(self):
         result = pre_trade_check(
             daily_pnl=0.0,
             trade_count=0,
-            time_et=make_et(15, 30),
-            consecutive_losses=0,
-        )
-        assert result["approved"] is False
-
-    def test_allows_at_3_29pm(self):
-        result = pre_trade_check(
-            daily_pnl=0.0,
-            trade_count=0,
-            time_et=make_et(15, 29),
+            time_et=make_et(15, 44),
             consecutive_losses=0,
         )
         # Not blocked by the afternoon time check
-        assert "3:30" not in result["reason"] or result["approved"] is True
+        assert "3:45" not in result["reason"] or result["approved"] is True
 
 
 # ── Happy path ────────────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ class TestKillSwitchFunction:
     def test_no_kill_all_clear(self):
         result = check_kill_switch(
             consecutive_losses=1,
-            daily_pnl=-500,
+            daily_pnl=-499,  # one dollar above the kill limit
             peak_equity=100_000,
             current_equity=99_000,
         )

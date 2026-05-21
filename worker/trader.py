@@ -27,7 +27,7 @@ load_dotenv()
 
 # Internal imports (after load_dotenv so DATABASE_URL is set)
 from worker import db, risk
-from worker.strategy import VWAPTrendPullback
+from worker.strategy import VWAPTrendPullback, MultiSessionStrategy
 from worker.email_report import send_daily_report, send_morning_brief, send_noon_update
 from diagnostics.analyzer import analyze_anomaly
 from models.regime_classifier import RegimeClassifier
@@ -56,7 +56,7 @@ DRY_RUN: bool = os.getenv("DRY_RUN", _dry_run_default).lower() == "true"
 # ALLOW_SHORTS: shorts are disabled until TradersPost short-side execution is confirmed
 ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "false").lower() == "true"
 # LONG_ONLY: additional guard — skip all short entries regardless of ALLOW_SHORTS
-LONG_ONLY: bool = os.getenv("LONG_ONLY", "true").lower() == "true"
+LONG_ONLY: bool = os.getenv("LONG_ONLY", "false").lower() == "true"
 
 # ── Global mutable state ──────────────────────────────────────────────────────
 _state = {
@@ -76,7 +76,7 @@ _state = {
 
 # Lazy-initialized Alpaca client (not created until first use)
 _trading_client = None
-_strategy = VWAPTrendPullback()
+_strategy = MultiSessionStrategy()
 _classifier = RegimeClassifier()
 _scheduler = None
 
@@ -390,7 +390,7 @@ def _place_buy_order(signal: dict) -> dict | None:
     Simulates the order if Alpaca keys are missing.
     """
     client = _get_trading_client()
-    levels = _strategy.get_levels(signal["price"], signal["atr"])
+    levels = _strategy.get_levels(signal["price"], signal.get("atr", 0.0))
 
     if client is None:
         # Simulated paper order
@@ -552,8 +552,9 @@ def _close_position(reason: str, exit_price: float):
     )
 
     # Close Alpaca paper position (LONG only — SHORT not tracked in Alpaca SPY account)
+    # Always sell exactly MAX_CONTRACTS (1 SPY share), not MES contract count
     if direction == "LONG":
-        _place_sell_order(qty)
+        _place_sell_order(risk.MAX_CONTRACTS)
 
     # Fire TradersPost exit with explicit intent labels
     _es_bid2, _es_ask2 = _get_es_bid_ask()
@@ -693,6 +694,17 @@ def five_min_bar_job():
                 _close_position("target_hit", current_price)
                 return
 
+        # Move stop to breakeven (+0.02 buffer) once price moves 1R in our favour
+        entry     = pos["entry"]
+        stop_dist = abs(entry - pos["stop"])
+        if stop_dist > 0:
+            if direction == "LONG" and current_price >= entry + stop_dist and pos["stop"] < entry:
+                pos["stop"] = round(entry + 0.02, 2)
+                logger.info(f"TRAIL: breakeven stop → {pos['stop']:.2f} (entry={entry:.2f})")
+            elif direction == "SHORT" and current_price <= entry - stop_dist and pos["stop"] > entry:
+                pos["stop"] = round(entry - 0.02, 2)
+                logger.info(f"TRAIL: breakeven stop → {pos['stop']:.2f} (entry={entry:.2f})")
+
         entry_time = pos.get("entry_time")
         if entry_time:
             elapsed = (datetime.now(timezone.utc) - entry_time).total_seconds() / 60
@@ -792,20 +804,21 @@ def five_min_bar_job():
             )
         return
 
-    # ── Signal fired log (12 decision fields) ────────────────────────────────
+    # ── Signal fired log ──────────────────────────────────────────────────────
     logger.info(
-        f"SIGNAL FIRED [{direction}]: {now_et.strftime('%H:%M:%S')} | "
+        f"SIGNAL FIRED [{direction}] [{signal.get('strategy', 'VWAP')}]: "
+        f"{now_et.strftime('%H:%M:%S')} | "
         f"SPY={signal['price']:.2f} | "
-        f"OR={signal['or_high']:.2f}/{signal['or_low']:.2f} | "
-        f"VWAP={signal['vwap']:.2f} EMA9={signal['ema9']:.2f} EMA21={signal['ema21']:.2f} | "
-        f"ATR={signal['atr']:.4f}(raw={signal['raw_atr']:.4f}) | "
-        f"PB_H={signal['pullback_high']:.2f} PB_L={signal['pullback_low']:.2f} | "
+        f"OR={signal.get('or_high') or 0:.2f}/{signal.get('or_low') or 0:.2f} | "
+        f"VWAP={signal.get('vwap', 0):.2f} EMA9={signal.get('ema9', 0):.2f} "
+        f"EMA21={signal.get('ema21', 0):.2f} | "
+        f"ATR={signal.get('atr', 0):.4f}(raw={signal.get('raw_atr', 0):.4f}) | "
         f"Stop={signal['stop']:.2f} Target={signal['target']:.2f} "
         f"Dist={signal['stop_distance']:.4f} | "
-        f"Phase={signal['phase']} MaxRisk=${signal['max_risk']:.0f} "
-        f"Actual=${signal['risk_actual']:.0f} | "
+        f"Phase={signal.get('phase', '?')} MaxRisk=${signal.get('max_risk', 0):.0f} "
+        f"Actual=${signal.get('risk_actual', 0):.0f} | "
         f"Contracts={signal['contracts']} MES | "
-        f"VWAPx={signal['vwap_crossings']} | "
+        f"VWAPx={signal.get('vwap_crossings', 'N/A')} | "
         f"Regime={regime}"
     )
 
@@ -837,7 +850,7 @@ def five_min_bar_job():
         "stop": signal["stop"],
         "target": signal["target"],
         "qty": signal["contracts"],     # MES contracts
-        "atr": signal["atr"],
+        "atr": signal.get("atr", 0.0),
         "stop_distance": signal["stop_distance"],
         "order_id": order.get("id"),
         "es_entry": _es_entry_price,    # ES proxy price for P&L calculation
@@ -860,8 +873,12 @@ def five_min_bar_job():
         logger.warning(f"Discord entry notification failed: {_e}")
 
 
+_status_db_error_count: int = 0
+
+
 def update_status_job():
     """Update system_status table every 60 seconds."""
+    global _status_db_error_count
     try:
         db.log_status({
             "status": "PAUSED" if _state["is_paused"] else "RUNNING",
@@ -873,8 +890,12 @@ def update_status_job():
             "session_day": _state["session_day"],
             "message": f"Equity=${_state['current_equity']:.0f} | Position={'OPEN' if _state['current_position'] else 'NONE'}",
         })
+        _status_db_error_count = 0  # reset on success
     except Exception as e:
-        logger.error(f"update_status_job error: {e}")
+        _status_db_error_count += 1
+        # Log the first 3 failures, then every 30th to avoid flooding during outages
+        if _status_db_error_count <= 3 or _status_db_error_count % 30 == 0:
+            logger.error(f"update_status_job error (#{_status_db_error_count}): {e}")
 
 
 def market_open_job():
