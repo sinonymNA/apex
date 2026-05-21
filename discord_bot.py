@@ -185,12 +185,25 @@ def _post_feed(message: str):
 
 
 # ── Public API (called from trader.py) ───────────────────────────────────────
-def post_trade_entry(price: float, stop: float, target: float, running_pnl: float):
+def post_trade_entry(
+    price: float,
+    stop: float,
+    target: float,
+    running_pnl: float,
+    direction: str = "LONG",
+    grade: str = "A",
+    strategy: str = "",
+    contracts: int = 1,
+):
+    icon  = "🟢" if direction == "LONG" else "🔴"
+    side  = "LONG" if direction == "LONG" else "SHORT"
+    risk  = abs(price - stop) * 10 * 5 * contracts  # SPY×10 × $5/pt × contracts
+    strat = f" | {strategy}" if strategy else ""
     _post_feed(
-        f"🟢 **ENTRY** ESM2026 Long\n"
-        f" Price: ${price:.2f}\n"
+        f"{icon} **{side} ENTRY** — {grade} grade{strat}\n"
+        f" Price: ${price:.2f} | {contracts} MES\n"
         f" Stop: ${stop:.2f} | Target: ${target:.2f}\n"
-        f" Eval: ${running_pnl:.2f} / $3,000"
+        f" Risk: ${risk:.0f} | Eval: ${running_pnl:+,.0f} / $3,000"
     )
 
 
@@ -280,6 +293,75 @@ def post_milestone(key: str):
     if not is_milestone_fired(key):
         mark_milestone_fired(key)
     _post_feed(message)
+
+
+def post_bihourly_update(
+    label: str,
+    daily_pnl: float,
+    trade_count: int,
+    regime: str,
+    spy_price: float,
+    in_position: bool,
+    recent_trades: list,
+    near_misses: list,
+    assessment: str = "",
+):
+    """Bi-hourly Discord pulse: what happened in the last 2 hours and why."""
+    # ── position line ─────────────────────────────────────────────────────────
+    pos_icon = "📍 In position" if in_position else "⏳ Flat"
+    pnl_icon = "▲" if daily_pnl >= 0 else "▼"
+
+    # ── trades this window ────────────────────────────────────────────────────
+    if recent_trades:
+        trade_lines = []
+        for t in recent_trades:
+            pnl  = t.get("pnl_dollars") or t.get("pnl") or 0.0
+            icon = "✅" if pnl > 0 else "❌"
+            d    = t.get("direction", t.get("dir", "?"))
+            gr   = t.get("grade", "?")
+            px_e = t.get("entry_price") or t.get("entry") or 0.0
+            px_x = t.get("exit_price")  or t.get("exit")  or 0.0
+            rsn  = t.get("exit_reason") or t.get("reason") or ""
+            tm   = t.get("exit_time")   or t.get("time")   or ""
+            if hasattr(tm, "strftime"):
+                tm = tm.strftime("%H:%M")
+            trade_lines.append(
+                f"  {icon} {d} {gr} ${px_e:.2f}→${px_x:.2f}  {pnl:+.0f}  {rsn}  {tm}"
+            )
+        trades_section = "**Trades this window:**\n" + "\n".join(trade_lines)
+    else:
+        trades_section = "**Trades this window:** none"
+
+    # ── near-misses / no-trade reasons ───────────────────────────────────────
+    reason_labels = {
+        "risk_blocked":   "risk gate",
+        "chop_blocked":   "choppy market",
+        "volume_blocked": "low volume",
+        "grade_blocked":  "below grade",
+        "regime_blocked": "wrong regime",
+        "no_signal":      "no setup",
+    }
+    if near_misses:
+        seen: dict = {}
+        for nm in near_misses:
+            r = nm.get("blocked_reason") or "no_signal"
+            seen[r] = seen.get(r, 0) + 1
+        nm_parts = [f"{reason_labels.get(r, r)} ×{n}" for r, n in seen.items()]
+        nm_section = "**Skipped because:** " + ", ".join(nm_parts)
+    else:
+        nm_section = "**Skipped because:** no setups scanned"
+
+    body = (
+        f"🕐 **{label} PULSE**\n"
+        f" SPY: ${spy_price:.2f} | Regime: {regime}\n"
+        f" P&L today: ${daily_pnl:+,.0f}  {pnl_icon} | Trades: {trade_count} | {pos_icon}\n"
+        f"\n{trades_section}\n"
+        f"{nm_section}"
+    )
+    if assessment:
+        body += f"\n\n_{assessment}_"
+
+    _post_feed(body)
 
 
 def post_daily_summary(

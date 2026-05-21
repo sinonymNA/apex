@@ -903,6 +903,10 @@ def five_min_bar_job():
             stop=signal["stop"],
             target=signal["target"],
             running_pnl=running_pnl,
+            direction=signal.get("direction", "LONG"),
+            grade=signal.get("grade", "A"),
+            strategy=signal.get("strategy", ""),
+            contracts=signal.get("contracts", 1),
         )
     except Exception as _e:
         logger.warning(f"Discord entry notification failed: {_e}")
@@ -1147,6 +1151,83 @@ def regime_log_job():
         logger.warning(f"regime_log_job error: {e}")
 
 
+def bihourly_discord_job(label: str):
+    """10 AM and 2 PM ET: Discord pulse — what was seen, what traded, why skipped."""
+    try:
+        import anthropic
+        import discord_bot as _db
+        from datetime import timezone as _tz, timedelta as _td
+
+        df = _fetch_bars()
+        spy_price = 0.0
+        if df is not None and not df.empty:
+            spy_price = float(df["Close"].iloc[-1])
+
+        # Near-misses from the last 2 hours
+        cutoff = datetime.now(_tz.utc) - _td(hours=2)
+        all_nm = db.get_today_near_misses()
+        window_nm = [
+            nm for nm in all_nm
+            if nm.get("timestamp") and (
+                nm["timestamp"].replace(tzinfo=_tz.utc)
+                if nm["timestamp"].tzinfo is None
+                else nm["timestamp"]
+            ) >= cutoff
+        ]
+
+        # Trades in the last 2 hours (from in-memory daily_trades)
+        window_trades = []
+        for t in _state["daily_trades"]:
+            et = t.get("exit_time")
+            if et:
+                if not hasattr(et, "tzinfo") or et.tzinfo is None:
+                    et = et.replace(tzinfo=_tz.utc)
+                if et >= cutoff:
+                    window_trades.append(t)
+
+        # Claude 1-sentence market read
+        assessment = ""
+        try:
+            client = anthropic.Anthropic()
+            trade_summary = (
+                f"{len(window_trades)} trade(s) executed" if window_trades
+                else "no trades executed"
+            )
+            nm_count = len(window_nm)
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=80,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Sable trading system — {label} check-in.\n"
+                        f"Regime: {_state['regime']} | SPY: ${spy_price:.2f}\n"
+                        f"Last 2h: {trade_summary}, {nm_count} setups scanned.\n"
+                        f"Daily P&L: ${_state['daily_pnl']:+.0f}\n"
+                        f"Write exactly one sentence: what the market is doing and "
+                        f"whether conditions favor trading. Be direct, no fluff."
+                    ),
+                }],
+            )
+            assessment = msg.content[0].text.strip()
+        except Exception:
+            pass
+
+        _db.post_bihourly_update(
+            label=label,
+            daily_pnl=_state["daily_pnl"],
+            trade_count=_state["trade_count"],
+            regime=_state["regime"],
+            spy_price=spy_price,
+            in_position=_state["current_position"] is not None,
+            recent_trades=window_trades,
+            near_misses=window_nm,
+            assessment=assessment,
+        )
+    except Exception as e:
+        logger.error(f"bihourly_discord_job({label}) error: {e}")
+
+
 def discord_summary_job():
     """4:30 PM ET Mon-Fri: post daily summary to Discord with a Claude assessment."""
     try:
@@ -1381,6 +1462,22 @@ def main():
         CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour="9-16", minute="*/30"),
         id="regime_log",
         name="Regime Log",
+    )
+
+    # Bi-hourly Discord pulse: 10 AM and 2 PM ET
+    _scheduler.add_job(
+        lambda: bihourly_discord_job("10 AM"),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=10, minute=0),
+        id="bihourly_10am",
+        name="Bi-Hourly Pulse 10 AM",
+        misfire_grace_time=1800,
+    )
+    _scheduler.add_job(
+        lambda: bihourly_discord_job("2 PM"),
+        CronTrigger(day_of_week="mon-fri", timezone="America/New_York", hour=14, minute=0),
+        id="bihourly_2pm",
+        name="Bi-Hourly Pulse 2 PM",
+        misfire_grace_time=1800,
     )
 
     # Discord daily summary at 4:30 PM ET Mon-Fri (after market close)
