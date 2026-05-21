@@ -263,18 +263,22 @@ class VWAPTrendPullback:
         self, max_risk: float, current_equity: float, peak_equity: float
     ) -> Optional[float]:
         """
-        Apply trailing drawdown gates.
-        Returns adjusted max_risk, or None to block trading.
+        Progressively scale down position size as equity approaches the DD limit.
+        Never hard-blocks (the risk.py kill switch handles the absolute stop).
         Calibrated for $50K Apex account ($2,500 trailing DD limit).
         """
-        dd_line = peak_equity - 2_500.0
+        dd_line  = peak_equity - 2_500.0
         distance = current_equity - dd_line
-        if distance < 750:
-            return None
+        if distance <= 0:
+            return None             # at/past the funded limit — full stop
+        elif distance < 250:
+            return min(max_risk, 125.0)   # survival mode: ~1 contract
+        elif distance < 750:
+            return min(max_risk, 375.0)   # 30% of full risk
         elif distance < 1_250:
-            return min(max_risk, 750.0)
+            return min(max_risk, 750.0)   # 60%
         elif distance < 1_875:
-            return min(max_risk, 1_000.0)
+            return min(max_risk, 1_000.0) # 80%
         return max_risk
 
     def _size_contracts(
@@ -664,8 +668,12 @@ class OpeningRangeBreakout:
         # Trailing drawdown gate (mirrors VWAPTrendPullback._apply_drawdown_gate)
         dd_line  = peak_equity - 2_500.0
         distance = current_equity - dd_line
-        if distance < 750:
+        if distance <= 0:
             return None
+        elif distance < 250:
+            max_risk = min(max_risk, 125.0)
+        elif distance < 750:
+            max_risk = min(max_risk, 375.0)
         elif distance < 1_250:
             max_risk = min(max_risk, 750.0)
         elif distance < 1_875:
