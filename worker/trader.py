@@ -53,8 +53,8 @@ ALLOW_PROXY_TRADING: bool = os.getenv("ALLOW_PROXY_TRADING", "false").lower() ==
 # DRY_RUN: defaults true when PROXY+!allowProxyTrading; no orders sent when true
 _dry_run_default = "true" if (MARKET_DATA_MODE == "PROXY" and not ALLOW_PROXY_TRADING) else "false"
 DRY_RUN: bool = os.getenv("DRY_RUN", _dry_run_default).lower() == "true"
-# ALLOW_SHORTS: shorts are disabled until TradersPost short-side execution is confirmed
-ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "false").lower() == "true"
+# ALLOW_SHORTS: enable short-side entries (MES shorts via TradersPost, not tracked in Alpaca)
+ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "true").lower() == "true"
 # LONG_ONLY: additional guard — skip all short entries regardless of ALLOW_SHORTS
 LONG_ONLY: bool = os.getenv("LONG_ONLY", "false").lower() == "true"
 
@@ -694,16 +694,30 @@ def five_min_bar_job():
                 _close_position("target_hit", current_price)
                 return
 
-        # Move stop to breakeven (+0.02 buffer) once price moves 1R in our favour
+        # Multi-stage trailing stop using initial stop distance (never drifts)
         entry     = pos["entry"]
-        stop_dist = abs(entry - pos["stop"])
-        if stop_dist > 0:
-            if direction == "LONG" and current_price >= entry + stop_dist and pos["stop"] < entry:
-                pos["stop"] = round(entry + 0.02, 2)
-                logger.info(f"TRAIL: breakeven stop → {pos['stop']:.2f} (entry={entry:.2f})")
-            elif direction == "SHORT" and current_price <= entry - stop_dist and pos["stop"] > entry:
-                pos["stop"] = round(entry - 0.02, 2)
-                logger.info(f"TRAIL: breakeven stop → {pos['stop']:.2f} (entry={entry:.2f})")
+        init_dist = pos.get("stop_distance", abs(entry - pos["stop"]))
+        if init_dist > 0:
+            if direction == "LONG":
+                r = (current_price - entry) / init_dist
+                be_stop     = round(entry + 0.02, 2)
+                locked_stop = round(entry + 0.5 * init_dist, 2)
+                if r >= 1.5 and pos["stop"] < locked_stop:
+                    pos["stop"] = locked_stop
+                    logger.info(f"TRAIL: 1.5R → locked {pos['stop']:.2f} (+0.5R)")
+                elif r >= 1.0 and pos["stop"] < be_stop:
+                    pos["stop"] = be_stop
+                    logger.info(f"TRAIL: 1R → breakeven {pos['stop']:.2f}")
+            elif direction == "SHORT":
+                r = (entry - current_price) / init_dist
+                be_stop     = round(entry - 0.02, 2)
+                locked_stop = round(entry - 0.5 * init_dist, 2)
+                if r >= 1.5 and pos["stop"] > locked_stop:
+                    pos["stop"] = locked_stop
+                    logger.info(f"TRAIL: 1.5R → locked {pos['stop']:.2f} (+0.5R)")
+                elif r >= 1.0 and pos["stop"] > be_stop:
+                    pos["stop"] = be_stop
+                    logger.info(f"TRAIL: 1R → breakeven {pos['stop']:.2f}")
 
         entry_time = pos.get("entry_time")
         if entry_time:
@@ -739,10 +753,11 @@ def five_min_bar_job():
         # Per-candle decision log
         if _nm:
             t_now = now_et.time()
-            in_window = time(9, 45) <= t_now < time(11, 30)
+            in_orb       = time(9, 45) <= t_now < time(10, 15)
+            in_morning   = time(9, 45) <= t_now < time(11, 30)
+            in_afternoon = time(13, 0) <= t_now < time(15, 45)
+            in_window    = in_morning or in_afternoon
             or_break = _nm.get("or_long_break") or _nm.get("or_short_break")
-            vwap_aligned = _nm.get("above_vwap") or not _nm.get("above_vwap", True)
-            ema_aligned = _nm.get("ema_bullish") is not None
             chop = _nm.get("chop_blocked", False)
             at_limit = _state["trade_count"] >= risk.MAX_TRADES_PER_DAY
 
@@ -752,7 +767,8 @@ def five_min_bar_job():
                 _reason = "max_trades_reached"
             elif chop:
                 _reason = "vwap_chop"
-            elif not or_break:
+            elif in_morning and not in_afternoon and not or_break:
+                # Morning VWAP requires OR breakout; ORB and afternoon don't
                 _reason = "no_or_breakout"
             elif not (_nm.get("long_pullback_valid") or _nm.get("short_pullback_valid")):
                 _reason = "no_pullback_candle"

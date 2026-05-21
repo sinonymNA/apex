@@ -98,11 +98,14 @@ def pre_trade_check(
     Returns:
         {"approved": bool, "reason": str}
     """
-    # 1. Phase-based daily loss limit
+    # 1. Phase-based daily loss limit and profit target
     phase_limits = get_phase_limits(eval_pnl)
-    daily_limit = phase_limits["daily_loss"]
+    daily_limit  = phase_limits["daily_loss"]
+    daily_target = phase_limits["daily_profit_target"]
     if daily_pnl <= daily_limit:
         return {"approved": False, "reason": f"Daily loss limit reached (${daily_pnl:.0f} <= ${daily_limit:.0f}, Phase {phase_limits['phase']})"}
+    if daily_pnl >= daily_target:
+        return {"approved": False, "reason": f"Daily profit target reached (${daily_pnl:.0f} >= ${daily_target:.0f}, Phase {phase_limits['phase']}) — locking in the day"}
 
     # 2. Max trades per day
     if trade_count >= MAX_TRADES_PER_DAY:

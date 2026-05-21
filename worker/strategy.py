@@ -165,6 +165,18 @@ class VWAPTrendPullback:
             ], axis=1).max(axis=1)
             df["atr14"] = tr.rolling(14).mean()
 
+        # RSI 14 — filters exhausted/extended entries
+        if len(df) >= 15:
+            delta    = df["Close"].diff()
+            gain     = delta.clip(lower=0)
+            loss     = (-delta).clip(lower=0)
+            avg_gain = gain.ewm(com=13, adjust=False).mean()
+            avg_loss = loss.ewm(com=13, adjust=False).mean()
+            rs       = avg_gain / avg_loss.replace(0, np.nan)
+            df["rsi14"] = 100.0 - (100.0 / (1.0 + rs))
+        else:
+            df["rsi14"] = np.nan
+
         self._update_opening_range(df)
         return df
 
@@ -281,6 +293,25 @@ class VWAPTrendPullback:
 
         return {"high": pb_h, "low": pb_l}
 
+    def _check_entry_filters(self, valid: pd.DataFrame, current: pd.Series) -> tuple[bool, str]:
+        """
+        Common entry quality filters applied before LONG/SHORT signal generation.
+        Returns (passes, reason_if_blocked).
+        """
+        # Volume: confirmation bar must be at or above the 20-bar rolling average
+        avg_vol = float(valid["Volume"].tail(20).mean()) if "Volume" in valid.columns else 0.0
+        if avg_vol > 0 and float(current["Volume"]) < avg_vol:
+            return False, "low_volume"
+
+        # RSI: avoid entering in extended/exhausted conditions
+        # Healthy pullback zone: 35–65. Outside that we're chasing.
+        if "rsi14" in current.index:
+            rsi = float(current["rsi14"])
+            if not np.isnan(rsi) and not (35.0 <= rsi <= 65.0):
+                return False, f"rsi_extreme_{rsi:.0f}"
+
+        return True, ""
+
     def generate_signals(
         self,
         df: pd.DataFrame,
@@ -331,6 +362,11 @@ class VWAPTrendPullback:
         # Chop filter
         vwap_crossings = self._count_vwap_crossings(valid)
         if vwap_crossings > self.VWAP_CHOP_MAX:
+            return None
+
+        # Entry quality filters (volume + RSI)
+        ok, _filter_reason = self._check_entry_filters(valid, current)
+        if not ok:
             return None
 
         # Phase + drawdown-gated risk
@@ -701,6 +737,11 @@ class AfternoonVWAP(VWAPTrendPullback):
 
         vwap_crossings = self._count_vwap_crossings(valid)
         if vwap_crossings > self.VWAP_CHOP_MAX:
+            return None
+
+        # Entry quality filters (volume + RSI)
+        ok, _filter_reason = self._check_entry_filters(valid, current)
+        if not ok:
             return None
 
         eval_pnl = current_equity - 100_000.0
