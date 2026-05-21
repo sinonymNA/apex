@@ -1029,17 +1029,7 @@ class MultiSessionStrategy:
         sig["trend"]   = trend
         sig["has_sweep"] = has_sweep
 
-        # A+ setups: extend target to 3R (capture more on highest-quality entries)
-        if grade == "A+":
-            stop_dist = sig.get("stop_distance", 0.0)
-            if stop_dist > 0:
-                if sig["direction"] == "LONG":
-                    sig["target"] = round(sig["price"] + self.A_PLUS_TARGET_R * stop_dist, 2)
-                else:
-                    sig["target"] = round(sig["price"] - self.A_PLUS_TARGET_R * stop_dist, 2)
-                sig["target_r"] = self.A_PLUS_TARGET_R
-        else:
-            sig["target_r"] = 2.0
+        sig["target_r"] = 2.0
 
         # B-grade trades: reduce position size by 40%
         if grade == "B":

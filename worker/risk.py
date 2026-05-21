@@ -52,6 +52,7 @@ def get_phase_limits(eval_pnl: float) -> dict:
       Phase 2 ($1,000–$2,400): reduced risk, $450/day  = 15.0%  ✓
       Phase 3 ($2,400–$3,000): conservative, $400/day  = 13.3%  ✓  (final stretch)
 
+    Daily loss limits are symmetric with profit targets to keep expectancy positive.
     All daily profit caps are below 19% of FUNDED_PROFIT_TARGET ($570), satisfying the
     20% consistency rule even if evaluation ends at the minimum passing total.
 
@@ -59,11 +60,11 @@ def get_phase_limits(eval_pnl: float) -> dict:
         {"phase": int, "max_risk": float, "daily_loss": float, "daily_profit_target": float}
     """
     if eval_pnl >= 2_400:
-        return {"phase": 3, "max_risk": 750.0, "daily_loss": -1_000.0, "daily_profit_target": 400.0}
+        return {"phase": 3, "max_risk": 750.0, "daily_loss": -500.0, "daily_profit_target": 400.0}
     elif eval_pnl >= 1_000:
-        return {"phase": 2, "max_risk": 1_000.0, "daily_loss": -1_500.0, "daily_profit_target": 450.0}
+        return {"phase": 2, "max_risk": 1_000.0, "daily_loss": -550.0, "daily_profit_target": 450.0}
     else:
-        return {"phase": 1, "max_risk": 1_250.0, "daily_loss": -2_000.0, "daily_profit_target": 500.0}
+        return {"phase": 1, "max_risk": 1_250.0, "daily_loss": -600.0, "daily_profit_target": 500.0}
 
 
 def _in_news_blackout(time_et: datetime) -> tuple[bool, str]:
@@ -100,6 +101,7 @@ def pre_trade_check(
     time_et: datetime,
     consecutive_losses: int,
     eval_pnl: float = 0.0,
+    funded_mode: bool = False,
 ) -> dict:
     """
     Run all pre-trade risk checks in priority order.
@@ -111,28 +113,30 @@ def pre_trade_check(
         time_et: Current datetime in ET timezone
         consecutive_losses: Number of consecutive losing trades
         eval_pnl: Cumulative eval P&L (used for phase-based daily limit)
+        funded_mode: True on funded account — skips eval target gate, daily profit cap,
+                     and consistency cap (no eval rules apply post-passing)
 
     Returns:
         {"approved": bool, "reason": str}
     """
-    # 0. Evaluation complete — stop all trading immediately
-    if eval_pnl >= FUNDED_PROFIT_TARGET:
+    # 0. Evaluation complete — stop all trading immediately (eval mode only)
+    if not funded_mode and eval_pnl >= FUNDED_PROFIT_TARGET:
         return {"approved": False, "reason": f"EVALUATION PASSED — ${eval_pnl:.0f} >= ${FUNDED_PROFIT_TARGET:.0f} target. Stop trading and withdraw!"}
 
-    # 1. Phase-based daily loss limit and profit target
+    # 1. Phase-based daily loss limit (and profit target in eval mode)
     phase_limits = get_phase_limits(eval_pnl)
     daily_limit  = phase_limits["daily_loss"]
     daily_target = phase_limits["daily_profit_target"]
     if daily_pnl <= daily_limit:
         return {"approved": False, "reason": f"Daily loss limit reached (${daily_pnl:.0f} <= ${daily_limit:.0f}, Phase {phase_limits['phase']})"}
-    if daily_pnl >= daily_target:
+    if not funded_mode and daily_pnl >= daily_target:
         return {"approved": False, "reason": f"Daily profit target reached (${daily_pnl:.0f} >= ${daily_target:.0f}, Phase {phase_limits['phase']}) — locking in the day"}
 
-    # 1b. Consistency rule — daily profit cap is 19% of funded target ($570)
-    # Ensures no single day ever exceeds 20% of the $3,000 evaluation profit total
-    consistency_cap = FUNDED_PROFIT_TARGET * CONSISTENCY_LIMIT  # $570
-    if daily_pnl >= consistency_cap:
-        return {"approved": False, "reason": f"Consistency cap: ${daily_pnl:.0f} >= ${consistency_cap:.0f} (19% of ${FUNDED_PROFIT_TARGET:.0f} target)"}
+    # 1b. Consistency rule — eval mode only (not applicable on funded account)
+    if not funded_mode:
+        consistency_cap = FUNDED_PROFIT_TARGET * CONSISTENCY_LIMIT  # $570
+        if daily_pnl >= consistency_cap:
+            return {"approved": False, "reason": f"Consistency cap: ${daily_pnl:.0f} >= ${consistency_cap:.0f} (19% of ${FUNDED_PROFIT_TARGET:.0f} target)"}
 
     # 2. Max trades per day
     if trade_count >= MAX_TRADES_PER_DAY:

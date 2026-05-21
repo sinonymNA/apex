@@ -98,7 +98,7 @@ def _vol_profile(n: int, rng) -> np.ndarray:
 
 # ── position sim ──────────────────────────────────────────────────────────────
 
-def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
+def simulate_day(df, scenario, equity, peak_equity, eval_pnl, funded_mode: bool = False):
     strategy = MultiSessionStrategy()
     day_pnl  = 0.0
     n_trades = 0
@@ -213,6 +213,7 @@ def simulate_day(df, scenario, equity, peak_equity, eval_pnl):
             time_et=bar_time,
             consecutive_losses=consec_L,
             eval_pnl=eval_pnl + day_pnl,
+            funded_mode=funded_mode,
         )
         if not rc["approved"]:
             continue

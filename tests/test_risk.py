@@ -58,9 +58,9 @@ class TestDailyLossLimit:
         assert result["approved"] is False
 
     def test_allows_above_limit(self):
-        """Just above the limit should not be blocked by this check alone."""
+        """Well above the phase limit should not be blocked by this check alone."""
         result = pre_trade_check(
-            daily_pnl=MAX_DAILY_LOSS + 1,
+            daily_pnl=-100.0,  # above Phase 1 daily_loss limit (-$600)
             trade_count=0,
             time_et=make_et(11),
             consecutive_losses=0,

@@ -185,7 +185,7 @@ def main():
     for i, d in enumerate(funded_dates):
         scenario = _FUNDED_ROTATION[i % len(_FUNDED_ROTATION)]
         df  = make_day(scenario, base_price=BASE, seed=400 + i)
-        res = simulate_day(df, scenario, f_equity, f_peak, 0.0)
+        res = simulate_day(df, scenario, f_equity, f_peak, 0.0, funded_mode=True)
 
         f_equity    = res["equity"]
         f_peak      = max(f_peak, f_equity)
