@@ -269,11 +269,25 @@ async def health_check():
         os.getenv("RAILWAY_SNAPSHOT_ID", "unknown"),
     )
 
+    # ── Order gate status ─────────────────────────────────────────────────────
+    orders_enabled = False
+    orders_gate = "worker not loaded"
+    dry_run = True
+    allow_proxy = False
+    try:
+        from worker.trader import _is_order_allowed, DRY_RUN as _DRY_RUN, ALLOW_PROXY_TRADING as _ALLOW_PROXY
+        dry_run = _DRY_RUN
+        allow_proxy = _ALLOW_PROXY
+        orders_enabled, orders_gate = _is_order_allowed()
+    except Exception as e:
+        orders_gate = f"error: {e}"
+
     ready_to_trade = (
         alpaca_status == "connected"
         and traderspost_status == "connected"
         and not kill_switch
         and scheduler_status == "running"
+        and orders_enabled
     )
 
     return {
@@ -283,6 +297,10 @@ async def health_check():
         "current_position": current_position,
         "kill_switch": kill_switch,
         "scheduler": scheduler_status,
+        "orders_enabled": orders_enabled,
+        "orders_gate": orders_gate if not orders_enabled else "OK",
+        "dry_run": dry_run,
+        "allow_proxy_trading": allow_proxy,
         "es_front_month": "ESM2026",
         "railway_deployed_at": railway_deployed_at,
         "ready_to_trade": ready_to_trade,
