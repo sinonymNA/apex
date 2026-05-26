@@ -369,11 +369,11 @@ def _fire_traderspost(
     ).start()
 
 
-def _fire_traderspost_exit_with_fallback(limit_price: float, intent: str = "close_long"):
+def _fire_traderspost_exit_with_fallback(limit_price: float, contracts: int = 1, intent: str = "close_long"):
     """Limit sell immediately, then market exit after 30 s if limit didn't fill."""
     import threading, time
 
-    _fire_traderspost("sell", 1, "limit", limit_price, intent)
+    _fire_traderspost("sell", contracts, "limit", limit_price, intent)
 
     def _fallback():
         time.sleep(30)
@@ -563,7 +563,7 @@ def _close_position(reason: str, exit_price: float):
     elif direction == "LONG":
         _es_limit_sell = round(_es_ask2 - 0.25, 2) if _es_ask2 > 0 else 0.0
         if _es_limit_sell > 0:
-            _fire_traderspost_exit_with_fallback(_es_limit_sell, intent="close_long")
+            _fire_traderspost_exit_with_fallback(_es_limit_sell, contracts=qty, intent="close_long")
         else:
             _fire_traderspost("sell", qty, intent="close_long")
     else:
