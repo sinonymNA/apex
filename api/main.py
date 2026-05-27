@@ -362,7 +362,6 @@ async def test_signal():
                 "contracts": 1,
                 "sentAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "intent": intent,
-                "test": True,
             }
             try:
                 r = await client.post(webhook_url, json=payload, timeout=5.0)
