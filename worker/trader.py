@@ -557,20 +557,20 @@ def _close_position(reason: str, exit_price: float):
         _place_sell_order(risk.MAX_CONTRACTS)
 
     # Fire TradersPost exit with explicit intent labels
+    # Tradeify requires a price in every signal — always use limit orders with current price
     _es_bid2, _es_ask2 = _get_es_bid_ask()
-    if reason == "end_of_day":
-        _fire_traderspost("exit", 0, intent="close_all")
-    elif direction == "LONG":
+    if direction == "LONG":
         _es_limit_sell = round(_es_ask2 - 0.25, 2) if _es_ask2 > 0 else 0.0
         if _es_limit_sell > 0:
-            _fire_traderspost_exit_with_fallback(_es_limit_sell, contracts=qty, intent="close_long")
+            _fire_traderspost_exit_with_fallback(_es_limit_sell, contracts=qty,
+                                                  intent="close_all" if reason == "end_of_day" else "close_long")
         else:
-            _fire_traderspost("sell", qty, intent="close_long")
+            _fire_traderspost("sell", qty, intent="close_all" if reason == "end_of_day" else "close_long")
     else:
         # SHORT exit: buy back at limit (bid + 0.25)
         _es_limit_buy = round(_es_bid2 + 0.25, 2) if _es_bid2 > 0 else 0.0
         _fire_traderspost("buy", qty, "limit" if _es_limit_buy > 0 else "market",
-                          _es_limit_buy, intent="close_short")
+                          _es_limit_buy, intent="close_all" if reason == "end_of_day" else "close_short")
 
     # Discord trade exit notification
     try:
