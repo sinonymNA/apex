@@ -330,6 +330,61 @@ async def get_gates():
     return data or {"message": "No gate data yet"}
 
 
+@app.post("/api/test-signal", dependencies=[Depends(verify_auth)])
+async def test_signal():
+    """
+    Fire a 1-contract test buy then immediately a 1-contract test sell to
+    TradersPost. Use this to confirm the full Railway→TradersPost→Tradovate
+    pipeline is wired up before a real trade fires.
+
+    Check Tradovate after calling this — you should see a 1-contract MESM2026
+    buy order appear and then a sell close it within ~5 seconds.
+    """
+    import httpx
+    from datetime import timezone
+    from worker.trader import TRADERSPOST_TICKER, _is_order_allowed
+
+    webhook_url = os.getenv("TRADERSPOST_WEBHOOK_URL")
+    if not webhook_url:
+        return {"ok": False, "error": "TRADERSPOST_WEBHOOK_URL not set in Railway"}
+
+    allowed, gate_reason = _is_order_allowed()
+    if not allowed:
+        return {"ok": False, "error": f"Order gate blocked: {gate_reason}",
+                "fix": "Add ALLOW_PROXY_TRADING=true to Railway Variables and redeploy"}
+
+    results = []
+    async with httpx.AsyncClient() as client:
+        for action, intent in [("buy", "open_long"), ("sell", "close_long")]:
+            payload = {
+                "ticker": TRADERSPOST_TICKER,
+                "action": action,
+                "contracts": 1,
+                "sentAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "intent": intent,
+                "test": True,
+            }
+            try:
+                r = await client.post(webhook_url, json=payload, timeout=5.0)
+                results.append({
+                    "action": action,
+                    "status_code": r.status_code,
+                    "response": r.text[:300],
+                    "ok": r.status_code < 300,
+                })
+            except Exception as e:
+                results.append({"action": action, "ok": False, "error": str(e)})
+
+    all_ok = all(r["ok"] for r in results)
+    return {
+        "ok": all_ok,
+        "ticker": TRADERSPOST_TICKER,
+        "signals_sent": results,
+        "next_step": "Check Tradovate — a 1-contract buy+sell should appear in Open/Closed Orders" if all_ok
+                     else "One or more signals failed — see signals_sent for details",
+    }
+
+
 @app.get("/api/revenue", dependencies=[Depends(verify_auth)])
 async def get_revenue():
     """Aggregated P&L, trade stats, gate progress, and system state for Sable Agents."""
