@@ -291,6 +291,7 @@ async def send_traderspost_signal(
         "ticker": TRADERSPOST_TICKER,
         "action": action,
         "contracts": contracts,
+        "sentAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if order_type == "limit" and limit_price > 0:
         payload["orderType"] = "limit"
