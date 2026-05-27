@@ -149,6 +149,10 @@
             class="text-gray-500 hover:text-purple-400 text-xs border border-gray-700 hover:border-purple-600 rounded px-2 py-0.5 transition-colors">
             Test TradersPost
           </button>
+          <button id="test-signal-btn" onclick="testSignal()"
+            class="text-gray-500 hover:text-orange-400 text-xs border border-gray-700 hover:border-orange-600 rounded px-2 py-0.5 transition-colors">
+            Test Buy/Sell
+          </button>
           <span id="syscheck-summary" class="text-xs text-gray-500">Checking…</span>
         </div>
       </div>
@@ -861,6 +865,42 @@ async function testTradersPost() {
     btn.textContent = 'Error';
     btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
     alert('TradersPost request error: ' + e.message);
+    setTimeout(resetBtn, 8000);
+  }
+}
+
+async function testSignal() {
+  const btn = document.getElementById('test-signal-btn');
+  const resetBtn = () => {
+    btn.textContent = 'Test Buy/Sell';
+    btn.disabled = false;
+    btn.className = 'text-gray-500 hover:text-orange-400 text-xs border border-gray-700 hover:border-orange-600 rounded px-2 py-0.5 transition-colors';
+  };
+  btn.textContent = 'Trading…';
+  btn.disabled = true;
+  btn.className = 'text-yellow-400 text-xs border border-yellow-800 rounded px-2 py-0.5';
+
+  try {
+    const r = await fetch('/api/test-signal', { method: 'POST' });
+    const data = await r.json();
+
+    if (data.ok) {
+      btn.textContent = '✓ Sent';
+      btn.className = 'text-green-400 text-xs border border-green-800 rounded px-2 py-0.5';
+      const results = data.signals_sent
+        .map(s => `${s.action}: ${s.ok ? 'OK' : 'FAILED'}`)
+        .join('\n');
+      alert(`Pipeline Test OK ✓\n\nTicker: ${data.ticker}\n\n${results}\n\nCheck Tradovate — a 1-contract buy+sell should appear in Open/Closed Orders.`);
+    } else {
+      btn.textContent = '✗ Blocked';
+      btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
+      alert('Pipeline blocked:\n\n' + data.error + '\n\n' + (data.fix || 'Check Railway configuration'));
+    }
+    setTimeout(resetBtn, 8000);
+  } catch (e) {
+    btn.textContent = 'Error';
+    btn.className = 'text-red-400 text-xs border border-red-800 rounded px-2 py-0.5';
+    alert('Test signal error: ' + e.message);
     setTimeout(resetBtn, 8000);
   }
 }
