@@ -330,7 +330,7 @@ async def get_gates():
     return data or {"message": "No gate data yet"}
 
 
-@app.post("/api/test-signal", dependencies=[Depends(verify_auth)])
+@app.post("/api/test-signal")
 async def test_signal():
     """
     Fire a 1-contract test buy then immediately a 1-contract test sell to
