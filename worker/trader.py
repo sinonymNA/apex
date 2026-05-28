@@ -557,21 +557,14 @@ def _close_position(reason: str, exit_price: float):
     if direction == "LONG":
         _place_sell_order(risk.MAX_CONTRACTS)
 
-    # Fire TradersPost exit with explicit intent labels
-    # Tradeify requires a price in every signal — always use limit orders with current price
-    _es_bid2, _es_ask2 = _get_es_bid_ask()
+    # Fire TradersPost exit — market orders for immediate fills at actual MES price
+    _close_intent = "close_all" if reason == "end_of_day" else (
+        "close_long" if direction == "LONG" else "close_short"
+    )
     if direction == "LONG":
-        _es_limit_sell = round(_es_ask2 - 0.25, 2) if _es_ask2 > 0 else 0.0
-        if _es_limit_sell > 0:
-            _fire_traderspost_exit_with_fallback(_es_limit_sell, contracts=qty,
-                                                  intent="close_all" if reason == "end_of_day" else "close_long")
-        else:
-            _fire_traderspost("sell", qty, intent="close_all" if reason == "end_of_day" else "close_long")
+        _fire_traderspost("sell", qty, "market", 0.0, intent=_close_intent)
     else:
-        # SHORT exit: buy back at limit (bid + 0.25)
-        _es_limit_buy = round(_es_bid2 + 0.25, 2) if _es_bid2 > 0 else 0.0
-        _fire_traderspost("buy", qty, "limit" if _es_limit_buy > 0 else "market",
-                          _es_limit_buy, intent="close_all" if reason == "end_of_day" else "close_short")
+        _fire_traderspost("buy", qty, "market", 0.0, intent=_close_intent)
 
     # Discord trade exit notification
     try:
@@ -854,7 +847,7 @@ def five_min_bar_job():
         f"Contracts={signal['contracts']} MES | Regime={regime}"
     )
 
-    # ── Place entry order ─────────────────────────────────────────────────────
+    # ── Place entry order (market — no SPY×10 limit price) ───────────────────
     _es_bid, _es_ask = _get_es_bid_ask()
 
     if direction == "LONG":
@@ -862,18 +855,12 @@ def five_min_bar_job():
         if order is None:
             return
         _es_entry_price = _es_bid if _es_bid > 0 else _es_ask
-        _limit_price = round(_es_bid + 0.25, 2) if _es_bid > 0 else 0.0
-        _fire_traderspost("buy", signal["contracts"],
-                          "limit" if _limit_price > 0 else "market",
-                          _limit_price, intent="open_long")
+        _fire_traderspost("buy", signal["contracts"], "market", 0.0, intent="open_long")
     else:
         # SHORT: skip Alpaca paper order (SPY short tracking unreliable); use TradersPost only
         order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
         _es_entry_price = _es_ask if _es_ask > 0 else _es_bid
-        _limit_price = round(_es_ask - 0.25, 2) if _es_ask > 0 else 0.0
-        _fire_traderspost("sell", signal["contracts"],
-                          "limit" if _limit_price > 0 else "market",
-                          _limit_price, intent="open_short")
+        _fire_traderspost("sell", signal["contracts"], "market", 0.0, intent="open_short")
 
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
