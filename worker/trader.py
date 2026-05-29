@@ -38,7 +38,7 @@ SYMBOL = "SPY"              # Alpaca paper account symbol (proxy tracking only)
 ES_DATA_SYMBOL = "ES=F"    # yfinance symbol for ES monitoring
 ES_POINT_VALUE = 50.0      # USD per point for E-mini S&P 500
 MES_POINT_VALUE = 5.0      # USD per point for Micro E-mini S&P 500
-MES_MAX_CONTRACTS = 10     # max MES contracts per trade ($50K Tradeify account)
+MES_MAX_CONTRACTS = 2      # max MES contracts per trade ($50K Tradeify eval)
 ES_CONTRACTS = 1           # ES contracts cap (MES sizing handled per-signal)
 TRADERSPOST_TICKER = "MESM2026"  # MES June 2026 front month
 PAPER = True
