@@ -75,7 +75,7 @@ class VWAPTrendPullback:
     MAX_HOLD_MINUTES = 90  # max hold time in minutes
 
     MES_POINT_VALUE = 5.0
-    MES_MAX_CONTRACTS = 4
+    MES_MAX_CONTRACTS = 5
     ES_POINT_VALUE = 50.0
     ES_MAX_CONTRACTS = 1
 
@@ -594,7 +594,7 @@ class OpeningRangeBreakout:
     STOP_BUFFER     = 0.03    # SPY pts beyond OR boundary for stop placement
 
     MES_POINT_VALUE   = 5.0
-    MES_MAX_CONTRACTS = 4
+    MES_MAX_CONTRACTS = 5
 
     def __init__(self):
         self._fired_today: Optional[date] = None
