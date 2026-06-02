@@ -12,10 +12,12 @@ import pytz
 # Calibrated for Apex $50K MES evaluation account:
 #   Profit target:   $3,000 (evaluation passes when cumulative P&L reaches this)
 #   Trailing DD:     $2,500 (broker blows the account if equity drops this far from peak)
-#   Consistency:     20%    (no single day's profit > 20% of total at evaluation end)
+#   Consistency:     40%    (Tradeify rule: no single day > 40% of TOTAL cumulative P&L)
 FUNDED_PROFIT_TARGET = 3_000.0   # stop trading and withdraw when eval_pnl >= this
 FUNDED_TRAILING_DD   = 2_500.0   # broker's hard limit (informational — we stop earlier)
-CONSISTENCY_LIMIT    = 0.19      # 19% cap per day (one point under the 20% broker rule)
+# Tradeify's consistency rule is 40% of TOTAL cumulative profit (not a fixed daily cap).
+# We keep a 33% guard so the biggest day stays comfortably under the line at the $3K pass.
+CONSISTENCY_LIMIT    = 0.33      # 33% of target ($990) — margin under Tradeify's 40% rule
 
 # ── Kill switch constants — DO NOT OVERRIDE AT RUNTIME ───────────────────────
 MAX_DAILY_LOSS     = -2_000      # Phase 1 default; overridden by get_phase_limits() per trade
@@ -47,24 +49,25 @@ def get_phase_limits(eval_pnl: float) -> dict:
     """
     Return risk limits for the current eval phase based on cumulative P&L.
 
-    Calibrated for Apex $50K (5× the $10K base sizing):
-      Phase 1 ($0–$1,000):    full risk, $500/day cap  = 16.7% of $3K target  ✓ consistency
-      Phase 2 ($1,000–$2,400): reduced risk, $450/day  = 15.0%  ✓
-      Phase 3 ($2,400–$3,000): conservative, $400/day  = 13.3%  ✓  (final stretch)
+    Calibrated for Tradeify $50K Select ($3K target, 40%-of-total consistency rule):
+      Phase 1 ($0–$1,000):    full risk, $1,000/day cap
+      Phase 2 ($1,000–$2,400): reduced risk, $900/day
+      Phase 3 ($2,400–$3,000): conservative, $750/day  (final stretch)
 
-    Daily loss limits are symmetric with profit targets to keep expectancy positive.
-    All daily profit caps are below 19% of FUNDED_PROFIT_TARGET ($570), satisfying the
-    20% consistency rule even if evaluation ends at the minimum passing total.
+    Daily profit caps are deliberately generous so winning days can compound through
+    2–3 trades instead of locking after the first. The CONSISTENCY_LIMIT guard ($990)
+    is the real ceiling — it keeps any single day under Tradeify's 40%-of-total rule.
+    Daily loss limits remain the hard protective floor and are unchanged.
 
     Returns:
         {"phase": int, "max_risk": float, "daily_loss": float, "daily_profit_target": float}
     """
     if eval_pnl >= 2_400:
-        return {"phase": 3, "max_risk": 750.0, "daily_loss": -500.0, "daily_profit_target": 400.0}
+        return {"phase": 3, "max_risk": 750.0, "daily_loss": -500.0, "daily_profit_target": 750.0}
     elif eval_pnl >= 1_000:
-        return {"phase": 2, "max_risk": 1_000.0, "daily_loss": -550.0, "daily_profit_target": 450.0}
+        return {"phase": 2, "max_risk": 1_000.0, "daily_loss": -550.0, "daily_profit_target": 900.0}
     else:
-        return {"phase": 1, "max_risk": 1_250.0, "daily_loss": -600.0, "daily_profit_target": 500.0}
+        return {"phase": 1, "max_risk": 1_250.0, "daily_loss": -600.0, "daily_profit_target": 1_000.0}
 
 
 def _in_news_blackout(time_et: datetime) -> tuple[bool, str]:

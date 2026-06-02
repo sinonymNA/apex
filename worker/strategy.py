@@ -365,16 +365,16 @@ class VWAPTrendPullback:
         Common entry quality filters applied before LONG/SHORT signal generation.
         Returns (passes, reason_if_blocked).
         """
-        # Volume: confirmation bar must be at or above the 20-bar rolling average
+        # Volume: confirmation bar must be within 10% of the 20-bar rolling average
         avg_vol = float(valid["Volume"].tail(20).mean()) if "Volume" in valid.columns else 0.0
-        if avg_vol > 0 and float(current["Volume"]) < avg_vol:
+        if avg_vol > 0 and float(current["Volume"]) < 0.9 * avg_vol:
             return False, "low_volume"
 
         # RSI: avoid entering in extended/exhausted conditions
-        # Healthy pullback zone: 35–65. Outside that we're chasing.
+        # Healthy pullback zone: 30–70. Outside that we're chasing.
         if "rsi14" in current.index:
             rsi = float(current["rsi14"])
-            if not np.isnan(rsi) and not (35.0 <= rsi <= 65.0):
+            if not np.isnan(rsi) and not (30.0 <= rsi <= 70.0):
                 return False, f"rsi_extreme_{rsi:.0f}"
 
         return True, ""
@@ -589,7 +589,7 @@ class OpeningRangeBreakout:
 
     MIN_OR_RANGE    = 0.15    # filter dead opens (SPY pts)
     MAX_OR_RANGE    = 1.80    # filter chaotic opens
-    VOL_MULTIPLIER  = 1.15    # volume confirmation threshold
+    VOL_MULTIPLIER  = 1.00    # volume confirmation threshold
     TARGET_R        = 2.0
     STOP_BUFFER     = 0.03    # SPY pts beyond OR boundary for stop placement
 
@@ -766,7 +766,7 @@ class AfternoonVWAP(VWAPTrendPullback):
     STOP_ATR_MAX     = 1.2
     ATR_MAX          = 0.70
     VWAP_CHOP_WINDOW = 15
-    VWAP_CHOP_MAX    = 2
+    VWAP_CHOP_MAX    = 3
 
     def generate_signals(
         self,
