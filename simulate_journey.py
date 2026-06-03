@@ -77,22 +77,23 @@ def fmt(x: float, sign=True) -> str:
 
 def main():
     # ── ACTUAL STATE as of June 3, 2026 (end of day) ─────────────────────────
-    # Confirmed trades:
-    #   Jun 02: +$68.75  (5 MES @ 7612.50 → 7615.25)
-    #   Jun 03: -$98.00  (3 MES afternoon, actual MES fill diverged from SPY proxy)
-    # Prior days: ~-$475.75 in earlier sessions (bot calibration / smaller sizing)
-    # Net eval P&L at end of Jun 3: -$505  →  equity $49,495
-    START_SIM   = date(2026, 6, 4)    # project forward from tomorrow
-    equity      = 49_495.0            # actual account balance after Jun 3
-    peak_equity = 50_000.0            # trailing DD measured from original $50K start
-    eval_pnl    = equity - 50_000.0   # -$505
+    # Confirmed from Tradovate:
+    #   Total realized loss: -$127.80 (today)
+    #   Account equity:      $49,465.33
+    # Changes deployed today:
+    #   - LONG_ONLY removed from Railway → shorts now live
+    #   - P&L sign flip bug fixed (live ES bid/ask race condition)
+    START_SIM   = date(2026, 6, 4)
+    equity      = 49_465.33
+    peak_equity = 50_000.0            # trailing DD from original $50K high-water mark
+    eval_pnl    = equity - 50_000.0   # -$534.67
     eval_pass_day = None
 
     W = 96
     print("═" * W)
     print(f"{'  SABLE SIM — $50K TRADEIFY EVAL → FUNDED ACCOUNT (95% SPLIT)':^{W}}")
-    print(f"{'  As of: Wed Jun 3, 2026  ·  Actual equity: $49,495  ·  Gap to pass: $3,505':^{W}}")
-    print(f"{'  Projecting from: Thu Jun 4  ·  Pass target: Fri Jun 13  ·  DD limit: $2,500':^{W}}")
+    print(f"{'  As of: Wed Jun 3, 2026  ·  Equity: $49,465  ·  Gap to pass: $3,535  ·  SHORTS LIVE':^{W}}")
+    print(f"{'  Projecting from: Thu Jun 4  ·  DD limit: $2,500  ·  95% payout split':^{W}}")
     print("═" * W)
 
     # ── PHASE 1: EVALUATION ───────────────────────────────────────────────────
@@ -263,7 +264,7 @@ def main():
     print(f"  Period                  : {START_SIM.strftime('%b %d')} → {funded_dates[-1].strftime('%b %d, %Y')}  ({cal_span} calendar days)")
     print(f"  Eval passed             : {eval_pass_day.strftime('%A, %B %d')}  (Day {n_eval_days} from Jun 4)")
     print()
-    print(f"  Actual deficit entering Jun 4 : -$505  (equity $49,495)")
+    print(f"  Actual deficit entering Jun 4 : -$535  (equity $49,465 — Tradovate confirmed)")
     print(f"  Eval P&L at pass        : {fmt(eval_pnl)}")
     print(f"  Funded gross P&L        : {fmt(f_cumul)}")
     print(f"  ─────────────────────────────────────────────────────────────────────")
