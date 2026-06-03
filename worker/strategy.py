@@ -75,7 +75,7 @@ class VWAPTrendPullback:
     MAX_HOLD_MINUTES = 90  # max hold time in minutes
 
     MES_POINT_VALUE = 5.0
-    MES_MAX_CONTRACTS = 6
+    MES_MAX_CONTRACTS = 8
     ES_POINT_VALUE = 50.0
     ES_MAX_CONTRACTS = 1
 
@@ -594,7 +594,7 @@ class OpeningRangeBreakout:
     STOP_BUFFER     = 0.03    # SPY pts beyond OR boundary for stop placement
 
     MES_POINT_VALUE   = 5.0
-    MES_MAX_CONTRACTS = 6
+    MES_MAX_CONTRACTS = 8
 
     def __init__(self):
         self._fired_today: Optional[date] = None
@@ -914,7 +914,7 @@ class MultiSessionStrategy:
         "B":  3,   # 3 factors — 60% size, 2R target
         # < 3      — rejected entirely
     }
-    B_SIZE_MULTIPLIER = 0.6        # B-grade trades use 60% of computed contracts
+    B_SIZE_MULTIPLIER = 0.75       # B-grade trades use 75% of computed contracts
     A_PLUS_TARGET_R    = 3.0       # A+ setups extend to 3R
 
     def __init__(self):

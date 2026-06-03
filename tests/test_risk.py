@@ -210,13 +210,42 @@ class TestTimeBlackout:
         assert "3:45" not in result["reason"] or result["approved"] is True
 
 
+# ── Lunch blackout ───────────────────────────────────────────────────────────
+class TestLunchBlackout:
+    def test_blocks_at_11_30(self):
+        result = pre_trade_check(daily_pnl=0.0, trade_count=0,
+                                 time_et=make_et(11, 30), consecutive_losses=0)
+        assert result["approved"] is False
+        assert "lunch" in result["reason"].lower() or "11:30" in result["reason"]
+
+    def test_blocks_at_noon(self):
+        result = pre_trade_check(daily_pnl=0.0, trade_count=0,
+                                 time_et=make_et(12, 0), consecutive_losses=0)
+        assert result["approved"] is False
+
+    def test_blocks_at_12_29(self):
+        result = pre_trade_check(daily_pnl=0.0, trade_count=0,
+                                 time_et=make_et(12, 29), consecutive_losses=0)
+        assert result["approved"] is False
+
+    def test_allows_at_12_30(self):
+        result = pre_trade_check(daily_pnl=0.0, trade_count=0,
+                                 time_et=make_et(12, 30), consecutive_losses=0)
+        assert result["approved"] is True
+
+    def test_allows_at_11_29(self):
+        result = pre_trade_check(daily_pnl=0.0, trade_count=0,
+                                 time_et=make_et(11, 29), consecutive_losses=0)
+        assert result["approved"] is True
+
+
 # ── Happy path ────────────────────────────────────────────────────────────────
 class TestApprovedNormalConditions:
     def test_all_checks_pass(self):
         result = pre_trade_check(
             daily_pnl=-100.0,
             trade_count=1,
-            time_et=make_et(11, 30),
+            time_et=make_et(10, 30),
             consecutive_losses=1,
         )
         assert result["approved"] is True

@@ -17,13 +17,13 @@ FUNDED_PROFIT_TARGET = 3_000.0   # stop trading and withdraw when eval_pnl >= th
 FUNDED_TRAILING_DD   = 2_500.0   # broker's hard limit (informational — we stop earlier)
 # Tradeify's consistency rule is 40% of TOTAL cumulative profit (not a fixed daily cap).
 # We keep a 33% guard so the biggest day stays comfortably under the line at the $3K pass.
-CONSISTENCY_LIMIT    = 0.33      # 33% of target ($990) — margin under Tradeify's 40% rule
+CONSISTENCY_LIMIT    = 0.30      # 30% of target ($900) — buffer under Tradeify's 40% rule
 
 # ── Kill switch constants — DO NOT OVERRIDE AT RUNTIME ───────────────────────
 MAX_DAILY_LOSS     = -2_000      # Phase 1 default; overridden by get_phase_limits() per trade
 TRAILING_DD_LIMIT  = -2_300      # Our kill switch: $200 safety buffer inside the $2,500 funded limit
 MAX_CONTRACTS      = 1           # SPY paper proxy shares (MES size controlled per-signal)
-MAX_TRADES_PER_DAY = 4           # Hard cap on trades per session
+MAX_TRADES_PER_DAY = 5           # Hard cap on trades per session
 NEWS_BLACKOUT_PRE_MIN  = 5       # Minutes before known news event to block entry
 NEWS_BLACKOUT_POST_MIN = 8       # Minutes after known news event to block entry
 KILL_CONSECUTIVE_LOSSES = 3      # Pause if this many losses in a row
@@ -50,9 +50,9 @@ def get_phase_limits(eval_pnl: float) -> dict:
     Return risk limits for the current eval phase based on cumulative P&L.
 
     Calibrated for Tradeify $50K Select ($3K target, 40%-of-total consistency rule):
-      Phase 1 ($0–$1,000):    full risk, $1,000/day cap
-      Phase 2 ($1,000–$2,400): reduced risk, $900/day
-      Phase 3 ($2,400–$3,000): conservative, $750/day  (final stretch)
+      Phase 1 ($0–$1,000):    full risk, $990/day cap (consistency limit is real ceiling)
+      Phase 2 ($1,000–$2,400): reduced risk, $990/day
+      Phase 3 ($2,400–$3,000): conservative, $900/day  (final stretch)
 
     Daily profit caps are deliberately generous so winning days can compound through
     2–3 trades instead of locking after the first. The CONSISTENCY_LIMIT guard ($990)
@@ -63,11 +63,11 @@ def get_phase_limits(eval_pnl: float) -> dict:
         {"phase": int, "max_risk": float, "daily_loss": float, "daily_profit_target": float}
     """
     if eval_pnl >= 2_400:
-        return {"phase": 3, "max_risk": 750.0, "daily_loss": -500.0, "daily_profit_target": 750.0}
+        return {"phase": 3, "max_risk": 750.0, "daily_loss": -500.0, "daily_profit_target": 900.0}
     elif eval_pnl >= 1_000:
         return {"phase": 2, "max_risk": 1_000.0, "daily_loss": -550.0, "daily_profit_target": 900.0}
     else:
-        return {"phase": 1, "max_risk": 1_250.0, "daily_loss": -600.0, "daily_profit_target": 1_000.0}
+        return {"phase": 1, "max_risk": 1_250.0, "daily_loss": -600.0, "daily_profit_target": 900.0}
 
 
 def _in_news_blackout(time_et: datetime) -> tuple[bool, str]:
@@ -150,18 +150,22 @@ def pre_trade_check(
     if t < time(9, 30):
         return {"approved": False, "reason": f"Too early — market opens at 9:30 AM ET (current: {t.strftime('%H:%M')})"}
 
-    # 4. Time window — after 3:45 PM ET
+    # 4. Lunch-hour blackout 11:30–12:30 ET — low volume, mean-reverting chop
+    if time(11, 30) <= t < time(12, 30):
+        return {"approved": False, "reason": f"Lunch blackout 11:30–12:30 ET (current: {t.strftime('%H:%M')})"}
+
+    # 5. Time window — after 3:45 PM ET
     if t >= time(15, 45):
         return {"approved": False, "reason": f"Too late — no entries after 3:45 PM ET (current: {t.strftime('%H:%M')})"}
 
-    # 5. Consecutive losses kill switch
+    # 6. Consecutive losses kill switch
     if consecutive_losses >= KILL_CONSECUTIVE_LOSSES:
         return {
             "approved": False,
             "reason": f"Kill switch: {consecutive_losses} consecutive losses (limit: {KILL_CONSECUTIVE_LOSSES})",
         }
 
-    # 6. News blackout
+    # 7. News blackout
     in_blackout, event_label = _in_news_blackout(time_et)
     if in_blackout:
         return {"approved": False, "reason": f"News blackout window: {event_label}"}
