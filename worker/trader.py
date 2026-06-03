@@ -371,10 +371,10 @@ def _fire_traderspost(
 
 
 def _fire_traderspost_exit_with_fallback(limit_price: float, contracts: int = 1, intent: str = "close_long"):
-    """Limit sell immediately, then market exit after 30 s if limit didn't fill."""
+    """Limit exit immediately, then market exit after 30 s if limit didn't fill."""
     import threading, time
 
-    _fire_traderspost("sell", contracts, "limit", limit_price, intent)
+    _fire_traderspost("exit", contracts, "limit", limit_price, intent)
 
     def _fallback():
         time.sleep(30)
@@ -548,14 +548,14 @@ def _close_position(reason: str, exit_price: float):
     if direction == "LONG":
         _place_sell_order(risk.MAX_CONTRACTS)
 
-    # Fire TradersPost exit — market orders for immediate fills at actual MES price
+    # Fire TradersPost exit — use "exit" action so a dangling close never
+    # accidentally opens a position in the opposite direction.
+    # "exit" is direction-agnostic: it closes whatever Tradovate has open
+    # and is a no-op if flat (unlike "buy"/"sell" which would open new legs).
     _close_intent = "close_all" if reason == "end_of_day" else (
         "close_long" if direction == "LONG" else "close_short"
     )
-    if direction == "LONG":
-        _fire_traderspost("sell", qty, "market", 0.0, intent=_close_intent)
-    else:
-        _fire_traderspost("buy", qty, "market", 0.0, intent=_close_intent)
+    _fire_traderspost("exit", qty, "market", 0.0, intent=_close_intent)
 
     # Discord trade exit notification
     try:
