@@ -37,26 +37,23 @@ NEWS_KEYWORDS = {
     "rates", "interest rate", "earnings", "unemployment", "cpi", "pce",
 }
 
-SABLE_SYSTEM = """You are SABLE — Ethan Sinon's personal assistant and deal hunter.
+SABLE_SYSTEM = """You are SABLE — Ethan Sinon's AI trading assistant.
 
 His situation:
-- Hunting Frontier Airlines Go Wild deals and cheap flights
-- Has a Frontier Go Wild pass (or is watching for one)
-- Goal: find deals fast, travel cheap
+- Running a Tradeify $50K Select eval account ($3,000 profit target, $2,500 trailing DD limit)
+- Trading MES (Micro E-mini S&P 500) via TradersPost → Tradovate
+- Strategy: VWAP pullback + Opening Range Breakout, 6 MES contracts max
+- Goal: pass the eval and reach funded status
 
-Travel deal capabilities:
-- When Ethan mentions a destination ("Huntington Beach", "I want to go to Chicago"),
-  you identify nearby airports and add them to his watchlist.
-  End your response with a tag on its own line: [AIRPORTS: LAX, SNA, LGB]
-- When he asks "show me deals" or "any deals?", tell him you're pulling the latest
-  and end with: [FETCH_DEALS]
-- When he asks what you're watching, list his current destinations clearly.
-- For any travel question, be specific about airports, distances, and tips.
+Your job:
+- Give him real-time trade updates, P&L status, and risk alerts
+- Answer questions about the eval, trade setup, and bot behavior
+- Be direct and concise — he's watching live trades
 
 Your personality:
 - Practical and fast. He wants info, not fluff.
 - Keep responses under 200 words.
-- Talk like a sharp friend who travels a lot."""
+- Talk like a sharp friend who knows trading."""
 
 # ── Module-level state ────────────────────────────────────────────────────────
 _bot: "discord.Client | None" = None
@@ -81,7 +78,7 @@ def _build_context() -> str:
         return ""
 
     state = _state_getter()
-    eval_pnl    = state["current_equity"] - 100_000.0
+    eval_pnl    = state["current_equity"] - 50_000.0
     daily_pnl   = state["daily_pnl"]
     session_day = state["session_day"]
     streak      = state.get("consecutive_wins", 0)
@@ -480,33 +477,6 @@ async def _news_loop():
         await asyncio.sleep(20 * 60)
 
 
-async def _post_deals_digest(channel) -> None:
-    """Fetch current Frontier deals from Google News and post a digest."""
-    try:
-        from frontier.monitor import fetch_current_deals
-        from frontier.destinations import get_watched_destinations, get_watched_airports
-        deals = await fetch_current_deals()
-    except Exception as e:
-        await channel.send(f"⚠️ Couldn't fetch deals: {e}")
-        return
-
-    watched = get_watched_airports()
-    destinations = get_watched_destinations()
-
-    if not deals:
-        await channel.send("No recent Frontier deal articles found. I'll ping you the moment something drops.")
-        return
-
-    lines = ["🛫 **Recent Frontier deals from the last 24–48h:**\n"]
-    for d in deals[:8]:
-        lines.append(f"• **{d['title']}**\n  {d['link']}\n  _{d['pubDate']}_")
-
-    if watched:
-        lines.append(f"\n📍 Watching airports: **{', '.join(watched)}**")
-        if destinations:
-            lines.append(f"For: {', '.join(destinations)}")
-
-    await channel.send("\n".join(lines)[:2000])
 
 
 # ── Bot internals ─────────────────────────────────────────────────────────────
@@ -551,7 +521,6 @@ async def _run_bot():
 
     @_bot.event
     async def on_message(message):
-        import re
         if message.author.bot:
             return
         if _talk_channel is None or message.channel.id != _talk_channel.id:
@@ -559,29 +528,6 @@ async def _run_bot():
 
         async with message.channel.typing():
             reply = await _respond_to_ethan(message.content)
-
-        # ── Parse [AIRPORTS: ...] tag ─────────────────────────────────────────
-        airport_match = re.search(r'\[AIRPORTS:\s*([A-Z, ]+)\]', reply, re.IGNORECASE)
-        if airport_match:
-            codes_raw = airport_match.group(1)
-            codes = [c.strip().upper() for c in codes_raw.split(",") if c.strip()]
-            reply = re.sub(r'\[AIRPORTS:[^\]]+\]', '', reply).strip()
-            if codes:
-                try:
-                    from frontier.destinations import add_destination
-                    # Save the raw message as the destination label
-                    _, all_airports = add_destination(message.content)
-                    reply += f"\n\n✈️ Watching for Frontier deals to/from: **{', '.join(all_airports)}**"
-                except Exception as e:
-                    logger.error(f"Watchlist save failed: {e}")
-
-        # ── Parse [FETCH_DEALS] tag ───────────────────────────────────────────
-        if "[FETCH_DEALS]" in reply:
-            reply = reply.replace("[FETCH_DEALS]", "").strip()
-            await message.channel.send(reply)
-            async with message.channel.typing():
-                await _post_deals_digest(message.channel)
-            return
 
         await message.channel.send(reply)
 
