@@ -489,23 +489,14 @@ def _close_position(reason: str, exit_price: float):
     qty = pos["qty"]             # MES contracts
 
     # P&L in MES dollars ($5/point, SPY×10 = ES proxy).
-    es_entry = pos.get("es_entry", 0.0)
-    es_bid, es_ask = _get_es_bid_ask()
-
-    if es_entry > 0 and (es_bid > 0 or es_ask > 0):
-        # LONG exit: sell at bid; SHORT exit: buy at ask
-        if direction == "LONG":
-            es_exit = es_bid if es_bid > 0 else es_ask
-            pnl_dollars = (es_exit - es_entry) * qty * MES_POINT_VALUE
-        else:
-            es_exit = es_ask if es_ask > 0 else es_bid
-            pnl_dollars = (es_entry - es_exit) * qty * MES_POINT_VALUE
-    else:
-        logger.warning("ES price unavailable at close — P&L approximated from SPY data")
-        spy_move = exit_price - entry_price
-        if direction == "SHORT":
-            spy_move = -spy_move
-        pnl_dollars = spy_move * 10 * qty * MES_POINT_VALUE
+    # Always use the SPY proxy exit_price (the price that triggered the close).
+    # Previously this fetched a live ES bid/ask at close time, which introduced a
+    # timing bug: if the price bounced in the 1-2s the network call took, a
+    # stop-hit loss could read as a win. SPY proxy is consistent and sign-correct.
+    spy_move = exit_price - entry_price
+    if direction == "SHORT":
+        spy_move = -spy_move
+    pnl_dollars = spy_move * 10 * qty * MES_POINT_VALUE
 
     stop_dist = pos.get("stop_distance", abs(entry_price - stop_price))
     risk_amount = max(stop_dist * 10 * qty * MES_POINT_VALUE, 1.0)
@@ -848,18 +839,14 @@ def five_min_bar_job():
     )
 
     # ── Place entry order (market — no SPY×10 limit price) ───────────────────
-    _es_bid, _es_ask = _get_es_bid_ask()
-
     if direction == "LONG":
         order = _place_buy_order(signal)
         if order is None:
             return
-        _es_entry_price = _es_bid if _es_bid > 0 else _es_ask
         _fire_traderspost("buy", signal["contracts"], "market", 0.0, intent="open_long")
     else:
         # SHORT: skip Alpaca paper order (SPY short tracking unreliable); use TradersPost only
         order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
-        _es_entry_price = _es_ask if _es_ask > 0 else _es_bid
         _fire_traderspost("sell", signal["contracts"], "market", 0.0, intent="open_short")
 
     _state["current_position"] = {
@@ -872,7 +859,6 @@ def five_min_bar_job():
         "atr": signal.get("atr", 0.0),
         "stop_distance": signal["stop_distance"],
         "order_id": order.get("id"),
-        "es_entry": _es_entry_price,    # ES proxy price for P&L calculation
         "grade": signal.get("grade", "?"),
         "target_r": signal.get("target_r", 2.0),
         "score": signal.get("score", 0),
@@ -881,7 +867,7 @@ def five_min_bar_job():
     logger.info(
         f"Position opened [{direction}]: {SYMBOL} @ {signal['price']:.2f} | "
         f"Stop={signal['stop']:.2f} | Target={signal['target']:.2f} | "
-        f"Contracts={signal['contracts']} MES | ES_entry={_es_entry_price:.2f}"
+        f"Contracts={signal['contracts']} MES"
     )
     try:
         import discord_bot as _db
