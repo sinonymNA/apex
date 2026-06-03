@@ -77,22 +77,25 @@ def fmt(x: float, sign=True) -> str:
 
 def main():
     # ── ACTUAL STATE as of June 3, 2026 (end of day) ─────────────────────────
-    # Confirmed from Tradovate:
-    #   Total realized loss: -$127.80 (today)
-    #   Account equity:      $49,465.33
-    # Changes deployed today:
-    #   - LONG_ONLY removed from Railway → shorts now live
-    #   - P&L sign flip bug fixed (live ES bid/ask race condition)
+    # Confirmed from TradersPost dashboard (Tradovate):
+    #   Account equity:      $49,101.43
+    #   Day P&L:             -$491.70 (3 accidental LONG positions from LONG_ONLY rejection bug)
+    # Fixes deployed (commit 636a893):
+    #   - close_short now uses action:"exit" (no-op if flat, can't open accidental longs)
+    #   - P&L sign flip bug fixed (removed live ES bid/ask race condition)
+    #   - LONG_ONLY env var removed from Railway
+    # REQUIRED before next session:
+    #   - Remove Tradovate platform-level LONG_ONLY restriction in account settings
     START_SIM   = date(2026, 6, 4)
-    equity      = 49_465.33
+    equity      = 49_101.43
     peak_equity = 50_000.0            # trailing DD from original $50K high-water mark
-    eval_pnl    = equity - 50_000.0   # -$534.67
+    eval_pnl    = equity - 50_000.0   # -$898.57
     eval_pass_day = None
 
     W = 96
     print("═" * W)
     print(f"{'  SABLE SIM — $50K TRADEIFY EVAL → FUNDED ACCOUNT (95% SPLIT)':^{W}}")
-    print(f"{'  As of: Wed Jun 3, 2026  ·  Equity: $49,465  ·  Gap to pass: $3,535  ·  SHORTS LIVE':^{W}}")
+    print(f"{'  As of: Wed Jun 3, 2026  ·  Equity: $49,101  ·  Gap to pass: $3,899  ·  EXIT-FIX DEPLOYED':^{W}}")
     print(f"{'  Projecting from: Thu Jun 4  ·  DD limit: $2,500  ·  95% payout split':^{W}}")
     print("═" * W)
 
@@ -264,7 +267,7 @@ def main():
     print(f"  Period                  : {START_SIM.strftime('%b %d')} → {funded_dates[-1].strftime('%b %d, %Y')}  ({cal_span} calendar days)")
     print(f"  Eval passed             : {eval_pass_day.strftime('%A, %B %d')}  (Day {n_eval_days} from Jun 4)")
     print()
-    print(f"  Actual deficit entering Jun 4 : -$535  (equity $49,465 — Tradovate confirmed)")
+    print(f"  Actual deficit entering Jun 4 : -$899  (equity $49,101 — TradersPost/Tradovate confirmed)")
     print(f"  Eval P&L at pass        : {fmt(eval_pnl)}")
     print(f"  Funded gross P&L        : {fmt(f_cumul)}")
     print(f"  ─────────────────────────────────────────────────────────────────────")
