@@ -76,20 +76,27 @@ def fmt(x: float, sign=True) -> str:
 
 
 def main():
-    START       = date(2026, 5, 21)
-    equity      = 50_000.0
-    peak_equity = equity
-    eval_pnl    = 0.0
+    # ── ACTUAL STATE as of June 3, 2026 (end of day) ─────────────────────────
+    # Confirmed trades:
+    #   Jun 02: +$68.75  (5 MES @ 7612.50 → 7615.25)
+    #   Jun 03: -$98.00  (3 MES afternoon, actual MES fill diverged from SPY proxy)
+    # Prior days: ~-$475.75 in earlier sessions (bot calibration / smaller sizing)
+    # Net eval P&L at end of Jun 3: -$505  →  equity $49,495
+    START_SIM   = date(2026, 6, 4)    # project forward from tomorrow
+    equity      = 49_495.0            # actual account balance after Jun 3
+    peak_equity = 50_000.0            # trailing DD measured from original $50K start
+    eval_pnl    = equity - 50_000.0   # -$505
     eval_pass_day = None
 
     W = 96
     print("═" * W)
-    print(f"{'  FULL JOURNEY: $50K APEX EVAL → FUNDED ACCOUNT (95% SPLIT)':^{W}}")
-    print(f"{'  Start: Thursday May 21, 2026  ·  Target: $3,000  ·  DD limit: $2,500':^{W}}")
+    print(f"{'  SABLE SIM — $50K TRADEIFY EVAL → FUNDED ACCOUNT (95% SPLIT)':^{W}}")
+    print(f"{'  As of: Wed Jun 3, 2026  ·  Actual equity: $49,495  ·  Gap to pass: $3,505':^{W}}")
+    print(f"{'  Projecting from: Thu Jun 4  ·  Pass target: Fri Jun 13  ·  DD limit: $2,500':^{W}}")
     print("═" * W)
 
     # ── PHASE 1: EVALUATION ───────────────────────────────────────────────────
-    eval_dates = trading_days_from(START, 60)
+    eval_dates = trading_days_from(START_SIM, 60)
     eval_records = []
 
     print(f"\n  {'━'*W}")
@@ -133,7 +140,7 @@ def main():
     all_eval_trades = [t for r in eval_records for t in r["trades"]]
     best_eval_day = max(r["day_pnl"] for r in eval_records)
     consistency   = best_eval_day / eval_pnl * 100 if eval_pnl > 0 else 0
-    cal_days      = (eval_pass_day - START).days + 1 if eval_pass_day else "N/A"
+    cal_days      = (eval_pass_day - START_SIM).days + 1 if eval_pass_day else "N/A"
     wins_e = [t for t in all_eval_trades if t["pnl"] > 0]
     wr_e   = 100 * len(wins_e) / len(all_eval_trades) if all_eval_trades else 0
 
@@ -147,7 +154,7 @@ def main():
     print(f"  EVAL RESULT")
     print(f"  {'━'*W}")
     if eval_pass_day:
-        cons_result = "✓ PASS" if consistency < 20 else f"✗ FAIL (biggest day too large)"
+        cons_result = "✓ PASS" if consistency < 40 else f"✗ FAIL (biggest day > 40% of total)"
         print(f"  ★ PASSED on {eval_pass_day.strftime('%A, %B %d, %Y')}  "
               f"({n_eval_days} trading days / {cal_days} calendar days)")
         print(f"    Eval P&L     : {fmt(eval_pnl)}")
@@ -247,16 +254,17 @@ def main():
         print(f"    No profitable months completed")
 
     # ── Grand total ───────────────────────────────────────────────────────────
-    cal_span = (funded_dates[-1] - START).days + 1
+    cal_span = (funded_dates[-1] - START_SIM).days + 1
     monthly_avg = total_payout / max(1, len(month_payouts))
 
     print(f"\n  {'═'*W}")
     print(f"{'  GRAND TOTAL':^{W}}")
     print(f"  {'═'*W}")
-    print(f"  Period                  : {START.strftime('%b %d')} → {funded_dates[-1].strftime('%b %d, %Y')}  ({cal_span} calendar days)")
-    print(f"  Eval passed             : {eval_pass_day.strftime('%A, %B %d')}  (Day {n_eval_days})")
+    print(f"  Period                  : {START_SIM.strftime('%b %d')} → {funded_dates[-1].strftime('%b %d, %Y')}  ({cal_span} calendar days)")
+    print(f"  Eval passed             : {eval_pass_day.strftime('%A, %B %d')}  (Day {n_eval_days} from Jun 4)")
     print()
-    print(f"  Eval P&L (kept by firm) : {fmt(eval_pnl)}")
+    print(f"  Actual deficit entering Jun 4 : -$505  (equity $49,495)")
+    print(f"  Eval P&L at pass        : {fmt(eval_pnl)}")
     print(f"  Funded gross P&L        : {fmt(f_cumul)}")
     print(f"  ─────────────────────────────────────────────────────────────────────")
     print(f"  Cash to you (95% split) : {fmt(total_payout, sign=False)}")
@@ -265,14 +273,14 @@ def main():
         print(f"  Annualized run rate     : ~{fmt(monthly_avg * 12, sign=False)}/year")
     print()
     print(f"  FINE PRINT:")
-    print(f"  · Synthetic data (σ≈0.05%/bar). Real fills ~$300-600 worse/month (slippage)")
-    print(f"  · Funded DD limit: $2,500 trailing from equity peak")
-    print(f"  · Payout frequency: Apex pays monthly on request (after min balance met)")
-    print(f"  · Consistency rule: no single day >20% of total profit at eval end")
-    if consistency >= 20:
+    print(f"  · Synthetic data (σ≈0.05%/bar). Real fills ~$300-600 worse/month (slippage+proxy mismatch)")
+    print(f"  · Funded DD limit: $2,500 trailing from equity peak ($50,000)")
+    print(f"  · Payout frequency: Tradeify pays monthly on request")
+    print(f"  · Consistency rule: no single day >40% of total cumulative P&L (Tradeify Select)")
+    if consistency >= 40:
         print(f"  ⚠ Consistency: {consistency:.1f}% — ONE big day drove the eval pass.")
-        print(f"    In reality Apex checks this: if one day's profit exceeds 20% of total,")
-        print(f"    the eval fails. Expect the pass to take 2-3 weeks, not {n_eval_days} days.")
+        print(f"    Tradeify checks this: if one day's profit exceeds 40% of total,")
+        print(f"    the eval fails. Expect the pass to take slightly longer.")
     print(f"  {'═'*W}")
 
 
