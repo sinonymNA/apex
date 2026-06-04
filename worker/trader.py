@@ -679,14 +679,16 @@ def five_min_bar_job():
                 _close_position("target_hit", current_price)
                 return
 
-        # Multi-stage trailing stop — locks profit at 1R/1.5R/(2R for A+ targets)
-        # All thresholds use INITIAL stop_distance so R-multiples stay accurate
+        # Multi-stage trailing stop — locks profit at 0.75R/1.5R/(2R for A+ targets)
+        # Uses bar HIGH (longs) / LOW (shorts) to detect intrabar R-level crossings
+        # so a brief spike to 0.75R that closes below it still locks the stop.
         entry     = pos["entry"]
         init_dist = pos.get("stop_distance", abs(entry - pos["stop"]))
         target_r  = pos.get("target_r", 2.0)
         if init_dist > 0:
             if direction == "LONG":
-                r          = (current_price - entry) / init_dist
+                bar_extreme = float(df["High"].iloc[-1])
+                r          = (bar_extreme - entry) / init_dist
                 be_stop    = round(entry + 0.02, 2)
                 lock_05R   = round(entry + 0.5 * init_dist, 2)
                 lock_15R   = round(entry + 1.5 * init_dist, 2)
@@ -697,11 +699,12 @@ def five_min_bar_job():
                 elif r >= 1.5 and pos["stop"] < lock_05R:
                     pos["stop"] = lock_05R
                     logger.info(f"TRAIL: 1.5R → locked 0.5R at {pos['stop']:.2f}")
-                elif r >= 1.0 and pos["stop"] < be_stop:
+                elif r >= 0.75 and pos["stop"] < be_stop:
                     pos["stop"] = be_stop
-                    logger.info(f"TRAIL: 1R → breakeven {pos['stop']:.2f}")
+                    logger.info(f"TRAIL: 0.75R high → breakeven {pos['stop']:.2f}")
             elif direction == "SHORT":
-                r          = (entry - current_price) / init_dist
+                bar_extreme = float(df["Low"].iloc[-1])
+                r          = (entry - bar_extreme) / init_dist
                 be_stop    = round(entry - 0.02, 2)
                 lock_05R   = round(entry - 0.5 * init_dist, 2)
                 lock_15R   = round(entry - 1.5 * init_dist, 2)
@@ -711,9 +714,9 @@ def five_min_bar_job():
                 elif r >= 1.5 and pos["stop"] > lock_05R:
                     pos["stop"] = lock_05R
                     logger.info(f"TRAIL: 1.5R → locked 0.5R at {pos['stop']:.2f}")
-                elif r >= 1.0 and pos["stop"] > be_stop:
+                elif r >= 0.75 and pos["stop"] > be_stop:
                     pos["stop"] = be_stop
-                    logger.info(f"TRAIL: 1R → breakeven {pos['stop']:.2f}")
+                    logger.info(f"TRAIL: 0.75R low → breakeven {pos['stop']:.2f}")
 
         entry_time = pos.get("entry_time")
         if entry_time:
