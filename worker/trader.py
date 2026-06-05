@@ -855,6 +855,11 @@ def five_min_bar_job():
     # ── Place entry order with native bracket stop/target ────────────────────
     # Convert SPY proxy prices to MES (×10). Tradovate manages stop/target
     # tick-by-tick; bot's proxy monitoring still runs as a backup.
+    #
+    # stopLoss bracket is sent for LONGs only. For SHORTs, fast fills land
+    # above the signal bar close, so the stop (above signal bar but below fill)
+    # is rejected by Tradovate as a buy stop below current price. The bot's
+    # SPY proxy monitoring reliably handles short exits instead.
     _mes_stop   = signal["stop"]   * 10
     _mes_target = signal["target"] * 10
     if direction == "LONG":
@@ -866,9 +871,11 @@ def five_min_bar_job():
                           stop_price=_mes_stop, target_price=_mes_target)
     else:
         order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
+        # No stopLoss bracket for shorts — proxy monitoring handles the stop.
+        # takeProfit bracket still fires if target is hit natively in Tradovate.
         _fire_traderspost("sell", signal["contracts"], "market", 0.0,
                           intent="open_short",
-                          stop_price=_mes_stop, target_price=_mes_target)
+                          stop_price=0.0, target_price=_mes_target)
 
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
