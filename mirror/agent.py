@@ -138,6 +138,7 @@ def _bar_to_candle(bar: dict) -> dict:
         "high": float(bar["high"]),
         "low": float(bar["low"]),
         "close": float(bar["close"]),
+        "volume": float(bar.get("upVolume", 0)) + float(bar.get("downVolume", 0)),
         "timestamp": str(bar.get("timestamp", "")),
     }
 
@@ -155,9 +156,11 @@ class TradovateMarketData:
         self,
         on_bar_closed: Callable[[str, list[dict]], None],
         symbols: list[str],
+        history_bars: int = 60,
     ):
         self._on_bar_closed = on_bar_closed
         self._symbols = symbols
+        self._history_bars = history_bars
 
         self._token: str = ""
         self._msg_id: int = 0
@@ -308,7 +311,7 @@ class TradovateMarketData:
                                 "elementSizeUnit": "UnderlyingUnits",
                                 "withHistogram": False,
                             },
-                            "timeRange": {"asMuchAsElements": 60},
+                            "timeRange": {"asMuchAsElements": self._history_bars},
                         })
                         await ws.send(f"md/subscribeTVChart\n{sub_id}\n\n{body}")
                         logger.info(f"Subscribing to {symbol} 1-min chart (msg_id={sub_id})")

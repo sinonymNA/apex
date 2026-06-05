@@ -2,8 +2,9 @@
 worker/trader.py — Main trading worker for Sable Stocks.
 
 Runs Monday-Friday 9:25 AM - 4:05 PM ET using APScheduler.
-Fetches SPY bars from Alpaca (yfinance fallback), runs VWAPTrendPullback strategy,
-checks regime and risk, places paper orders via Alpaca, and logs everything.
+Primary data source: Tradovate WebSocket MES 1-min bars (worker/mes_feed.py).
+Fallback: Alpaca 1-min SPY bars × 10 proxy when Tradovate is unavailable.
+Signals go to TradersPost → Tradovate → Tradeify eval account.
 
 Deploy as a Railway worker process. Handles SIGTERM gracefully.
 """
@@ -27,6 +28,7 @@ load_dotenv()
 
 # Internal imports (after load_dotenv so DATABASE_URL is set)
 from worker import db, risk
+from worker import mes_feed as _mes_feed          # Tradovate real-time MES bars
 from worker.strategy import VWAPTrendPullback, MultiSessionStrategy
 from worker.email_report import send_daily_report, send_morning_brief, send_noon_update
 from diagnostics.analyzer import analyze_anomaly
@@ -46,16 +48,19 @@ SESSION_START = time(9, 25)
 SESSION_END = time(16, 5)
 
 # ── Safety configuration (override via environment variables) ──────────────────
-# MARKET_DATA_MODE: "PROXY" = SPY×10 surrogate | "FUTURES_DIRECT" = live MES/ES data
+# MARKET_DATA_MODE: "PROXY" = SPY×10 surrogate | "FUTURES_DIRECT" = live MES data
+# Auto-promoted to FUTURES_DIRECT at runtime if the Tradovate feed connects.
 MARKET_DATA_MODE: str = os.getenv("MARKET_DATA_MODE", "PROXY")
-# ALLOW_PROXY_TRADING: must be explicitly "true" to send real/eval orders in PROXY mode
+# ALLOW_PROXY_TRADING: must be explicitly "true" to send real orders in PROXY mode.
+# Ignored (and orders always allowed) when FUTURES_DIRECT mode is active.
 ALLOW_PROXY_TRADING: bool = os.getenv("ALLOW_PROXY_TRADING", "false").lower() == "true"
-# DRY_RUN: defaults true when PROXY+!allowProxyTrading; no orders sent when true
+# DRY_RUN: defaults true when PROXY+!allowProxyTrading; no orders sent when true.
+# Automatically false when Tradovate feed is live (FUTURES_DIRECT).
 _dry_run_default = "true" if (MARKET_DATA_MODE == "PROXY" and not ALLOW_PROXY_TRADING) else "false"
 DRY_RUN: bool = os.getenv("DRY_RUN", _dry_run_default).lower() == "true"
-# ALLOW_SHORTS: enable short-side entries (MES shorts via TradersPost, not tracked in Alpaca)
+# ALLOW_SHORTS: enable short-side entries (MES shorts via TradersPost)
 ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "true").lower() == "true"
-# LONG_ONLY: additional guard — skip all short entries regardless of ALLOW_SHORTS
+# LONG_ONLY: skip all short entries regardless of ALLOW_SHORTS
 LONG_ONLY: bool = os.getenv("LONG_ONLY", "false").lower() == "true"
 
 # ── Global mutable state ──────────────────────────────────────────────────────
@@ -223,10 +228,22 @@ def _fetch_es_bars_yfinance() -> "pd.DataFrame | None":
 
 
 def _fetch_bars():
-    """Fetch SPY bars for signal generation.
-    Primary: 1-min bars from Alpaca (proven gate setting — 20-bar = 20-min window).
-    Fallback: 5-min bars from Alpaca, then yfinance.
+    """Fetch 1-min bars for signal generation.
+
+    Priority:
+      1. Tradovate WebSocket MES feed (real CME futures, ÷10 scaled to SPY proxy range)
+      2. Alpaca 1-min SPY bars (proxy — stop/target divergence risk, requires ALLOW_PROXY_TRADING)
+      3. Alpaca 5-min SPY bars (fallback)
+      4. yfinance SPY bars (last resort)
     """
+    # 1. Tradovate real MES bars (preferred — no proxy divergence)
+    if _mes_feed.is_ready():
+        df = _mes_feed.get_bars_df()
+        if df is not None:
+            return df
+        logger.warning("Tradovate feed ready but get_bars_df returned None — falling back")
+
+    # 2–4. Alpaca / yfinance SPY proxy
     df = _fetch_bars_1min_alpaca()
     if df is not None:
         return df
@@ -247,13 +264,21 @@ def _is_order_allowed() -> tuple[bool, str]:
 
     Returns (True, "OK") or (False, reason_string).
     Called before every TradersPost signal dispatch.
+
+    Orders are allowed when:
+      - Tradovate MES feed is live (FUTURES_DIRECT mode, no proxy risk), OR
+      - MARKET_DATA_MODE=PROXY AND ALLOW_PROXY_TRADING=true (explicit override)
     """
     if DRY_RUN:
         return False, "DRY_RUN mode active — no orders sent"
+    # Tradovate feed live → real MES prices, no proxy divergence risk → always allow
+    if _mes_feed.is_ready():
+        return True, "OK (Tradovate direct feed)"
+    # Proxy mode: require explicit opt-in
     if MARKET_DATA_MODE == "PROXY" and not ALLOW_PROXY_TRADING:
         return False, (
             "Proxy market data mode blocks real orders "
-            "(set ALLOW_PROXY_TRADING=true to override)"
+            "(set ALLOW_PROXY_TRADING=true to override, or configure Tradovate feed)"
         )
     return True, "OK"
 
@@ -1353,7 +1378,10 @@ def main():
 
     logger.info("Sable Stocks worker starting...")
 
-    # ── Data pipeline smoke test ──────────────────────────────────────────────
+    # ── Start Tradovate MES feed (primary data source) ────────────────────────
+    _mes_started = _mes_feed.start()
+
+    # ── Data pipeline smoke test (Alpaca fallback) ────────────────────────────
     _data_ok = False
     _data_detail = "no data"
     try:
@@ -1370,35 +1398,37 @@ def main():
 
     _es_bid, _es_ask = _get_es_bid_ask()
     _es_detail = (
-        f"bid={_es_bid:.2f} / ask={_es_ask:.2f} (SPY×10 proxy)"
+        f"bid={_es_bid:.2f} / ask={_es_ask:.2f}"
         if _es_bid > 0 else "unavailable — will retry on each trade"
     )
 
     # ── Premarket readiness log ───────────────────────────────────────────────
     _order_allowed, _order_reason = _is_order_allowed()
     _order_status = "ENABLED" if _order_allowed else f"BLOCKED — {_order_reason}"
+    _feed_status = (
+        "STARTING — buffering bars (will be ready within ~2 min)"
+        if _mes_started else
+        "NOT CONFIGURED — using Alpaca SPY proxy fallback"
+    )
     logger.info("=" * 55)
     logger.info("  SABLE TRADING SYSTEM — PREMARKET READINESS")
     logger.info(f"  {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S')} ET")
     logger.info("=" * 55)
     logger.info(f"  Instrument:          {TRADERSPOST_TICKER} (MES ${MES_POINT_VALUE:.0f}/point)")
-    logger.info(f"  Data source:         SPY 1-min Alpaca bars (×10 proxy)")
-    logger.info(f"  marketDataMode:      {MARKET_DATA_MODE}")
+    logger.info(f"  Tradovate MES feed:  {_feed_status}")
+    logger.info(f"  Alpaca fallback:     {'OK — ' + _data_detail if _data_ok else 'WARN — ' + _data_detail}")
     logger.info(f"  allowProxyTrading:   {str(ALLOW_PROXY_TRADING).lower()}")
     logger.info(f"  dryRun:              {str(DRY_RUN).lower()}")
     logger.info(f"  allowShorts:         {str(ALLOW_SHORTS).lower()}")
     logger.info(f"  longOnly:            {str(LONG_ONLY).lower()}")
     logger.info("  " + "-" * 51)
     logger.info(f"  Real/eval orders:    {_order_status}")
-    logger.info("  " + "-" * 51)
-    logger.info(f"  Data pipeline:       {'OK — ' + _data_detail if _data_ok else 'WARN — ' + _data_detail}")
     logger.info(f"  ES price:            {_es_detail}")
     logger.info("=" * 55)
-    if MARKET_DATA_MODE == "PROXY":
+    if not _mes_started:
         logger.warning(
-            "WARNING: Using SPY×10 proxy for MES pricing. "
-            "Signals may not match actual futures candles. "
-            "Real/eval orders disabled unless ALLOW_PROXY_TRADING=true."
+            "WARNING: Tradovate feed not started — falling back to SPY×10 proxy. "
+            "Set TRADOVATE_USERNAME + TRADOVATE_PASSWORD to enable real MES data."
         )
 
     _startup_catchup()
@@ -1510,6 +1540,10 @@ def start_background():
     import threading
 
     db.init_db()
+
+    # Start Tradovate MES feed before the scheduler so bars are already
+    # buffering while the scheduler warms up. No-op if TRADOVATE_USERNAME unset.
+    _mes_feed.start()
 
     try:
         import discord_bot
