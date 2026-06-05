@@ -871,11 +871,11 @@ def five_min_bar_job():
                           stop_price=_mes_stop, target_price=_mes_target)
     else:
         order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
-        # No stopLoss bracket for shorts — proxy monitoring handles the stop.
-        # takeProfit bracket still fires if target is hit natively in Tradovate.
+        # No brackets for shorts — proxy monitoring handles all short exits.
+        # Native brackets create orphaned limit orders when the proxy exits first.
         _fire_traderspost("sell", signal["contracts"], "market", 0.0,
                           intent="open_short",
-                          stop_price=0.0, target_price=_mes_target)
+                          stop_price=0.0, target_price=0.0)
 
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
