@@ -264,6 +264,8 @@ async def send_traderspost_signal(
     order_type: str = "market",
     limit_price: float = 0.0,
     intent: str = "",
+    stop_price: float = 0.0,
+    target_price: float = 0.0,
 ):
     """
     Send trading signal to TradersPost/Tradovate.
@@ -298,6 +300,13 @@ async def send_traderspost_signal(
         payload["limitPrice"] = limit_price
     if intent:
         payload["intent"] = intent   # informational; ignored by TP if unsupported
+    # Attach native bracket orders so Tradovate manages stop/target tick-by-tick.
+    # Prices are SPY-proxy × 10, rounded to MES tick (0.25). The bot's own proxy
+    # monitoring acts as a backup — exits via action:exit are no-ops if already flat.
+    if stop_price > 0:
+        payload["stopLoss"] = {"type": "stop", "stopPrice": round(round(stop_price * 4) / 4, 2)}
+    if target_price > 0:
+        payload["takeProfit"] = {"type": "limit", "limitPrice": round(round(target_price * 4) / 4, 2)}
 
     try:
         async with httpx.AsyncClient() as client:
@@ -357,6 +366,8 @@ def _fire_traderspost(
     order_type: str = "market",
     limit_price: float = 0.0,
     intent: str = "",
+    stop_price: float = 0.0,
+    target_price: float = 0.0,
 ):
     """Non-blocking sync wrapper — spawns a daemon thread to run the async signal."""
     import asyncio
@@ -364,7 +375,7 @@ def _fire_traderspost(
 
     threading.Thread(
         target=lambda: asyncio.run(
-            send_traderspost_signal(action, contracts, order_type, limit_price, intent)
+            send_traderspost_signal(action, contracts, order_type, limit_price, intent, stop_price, target_price)
         ),
         daemon=True,
     ).start()
@@ -841,16 +852,23 @@ def five_min_bar_job():
         f"Contracts={signal['contracts']} MES | Regime={regime}"
     )
 
-    # ── Place entry order (market — no SPY×10 limit price) ───────────────────
+    # ── Place entry order with native bracket stop/target ────────────────────
+    # Convert SPY proxy prices to MES (×10). Tradovate manages stop/target
+    # tick-by-tick; bot's proxy monitoring still runs as a backup.
+    _mes_stop   = signal["stop"]   * 10
+    _mes_target = signal["target"] * 10
     if direction == "LONG":
         order = _place_buy_order(signal)
         if order is None:
             return
-        _fire_traderspost("buy", signal["contracts"], "market", 0.0, intent="open_long")
+        _fire_traderspost("buy", signal["contracts"], "market", 0.0,
+                          intent="open_long",
+                          stop_price=_mes_stop, target_price=_mes_target)
     else:
-        # SHORT: skip Alpaca paper order (SPY short tracking unreliable); use TradersPost only
         order = {"id": f"short_{datetime.now(timezone.utc).timestamp()}"}
-        _fire_traderspost("sell", signal["contracts"], "market", 0.0, intent="open_short")
+        _fire_traderspost("sell", signal["contracts"], "market", 0.0,
+                          intent="open_short",
+                          stop_price=_mes_stop, target_price=_mes_target)
 
     _state["current_position"] = {
         "entry_time": datetime.now(timezone.utc),
